@@ -1,0 +1,39 @@
+name: Wails build
+
+on:
+  push:
+    tags:
+    # Match any new tag
+      - '*'
+
+env:
+  # Necessary for most environments as build failure can occur due to OOM issues
+  NODE_OPTIONS: "--max-old-space-size=4096"
+
+jobs:
+  build:
+    strategy:
+    # Failure in one platform build won't impact the others
+      fail-fast: false
+      matrix:
+        build:
+          - name: 'wechatDataBackup.exe'
+            platform:  'windows/amd64'
+            os: 'windows-latest'
+
+    runs-on: ${{ matrix.build.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
+      - name: Build wails
+        uses: dAppServer/wails-build-action@v2.2
+        id: build
+        with:
+          build-name: ${{ matrix.build.name }}
+          sign: false
+          build-platform: ${{ matrix.build.platform }}
+          package: true
+          go-version: '1.21'

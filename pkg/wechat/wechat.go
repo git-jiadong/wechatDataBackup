@@ -1,0 +1,653 @@
+package wechat
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha1"
+	"database/sql"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"unsafe"
+	"wechatDataBackup/pkg/lame"
+	"wechatDataBackup/pkg/silk"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/shirou/gopsutil/v3/process"
+	"golang.org/x/sys/windows"
+)
+
+type WeChatInfo struct {
+	ProcessID   uint32
+	FilePath    string
+	AcountName  string
+	Version     string
+	Is64Bits    bool
+	DllBaseAddr uintptr
+	DllBaseSize uint32
+	DBKey       string
+}
+
+type wechatMediaMSG struct {
+	Key      string
+	MsgSvrID int
+	Buf      []byte
+}
+
+func GetWeChatAllInfo() (WeChatInfo, error) {
+	info, err := GetWeChatInfo()
+	if err != nil {
+		log.Println("GetWeChatInfo:", err)
+		return info, err
+	}
+
+	info.DBKey = GetWeChatKey(&info)
+
+	return info, nil
+}
+
+func ExportWeChatAllData(info WeChatInfo, expPath string, progress chan<- string) {
+	defer close(progress)
+	fileInfo, err := os.Stat(info.FilePath)
+	if err != nil || !fileInfo.IsDir() {
+		progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%s error\"}", info.FilePath)
+		return
+	}
+	if !exportWeChatDateBase(info, expPath, progress) {
+		return
+	}
+
+	exportWeChatBat(info, expPath, progress)
+	exportWeChatVideoAndFile(info, expPath, progress)
+	exportWeChatVoice(info, expPath, progress)
+}
+
+func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) {
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat voice start\", \"progress\": 61}"
+
+	voicePath := fmt.Sprintf("%s\\FileStorage\\Voice", expPath)
+	if _, err := os.Stat(voicePath); err != nil {
+		if err := os.MkdirAll(voicePath, 0644); err != nil {
+			log.Printf("MkdirAll %s failed: %v\n", voicePath, err)
+			progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%v error\"}", err)
+			return
+		}
+	}
+
+	var wg sync.WaitGroup
+	index := -1
+	MSGChan := make(chan wechatMediaMSG, 100)
+	go func() {
+		for {
+			index += 1
+			mediaMSGDB := fmt.Sprintf("%s\\Msg\\Multi\\MediaMSG%d.db", expPath, index)
+			_, err := os.Stat(mediaMSGDB)
+			if err != nil {
+				break
+			}
+
+			db, err := sql.Open("sqlite3", mediaMSGDB)
+			if err != nil {
+				log.Printf("open %s failed: %v\n", mediaMSGDB, err)
+				continue
+			}
+			defer db.Close()
+
+			rows, err := db.Query("select Key, Reserved0, Buf from Media;")
+			if err != nil {
+				log.Printf("Query failed: %v\n", err)
+				continue
+			}
+
+			msg := wechatMediaMSG{}
+			for rows.Next() {
+				err := rows.Scan(&msg.Key, &msg.MsgSvrID, &msg.Buf)
+				if err != nil {
+					log.Println("Scan failed: ", err)
+					break
+				}
+
+				MSGChan <- msg
+			}
+		}
+		close(MSGChan)
+	}()
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for msg := range MSGChan {
+				mp3Path := fmt.Sprintf("%s\\%d.mp3", voicePath, msg.MsgSvrID)
+				_, err := os.Stat(mp3Path)
+				if err == nil {
+					continue
+				}
+
+				err = silkToMp3(msg.Buf[:], mp3Path)
+				if err != nil {
+					log.Printf("silkToMp3 %s failed: %v\n", mp3Path, err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat voice end\", \"progress\": 100}"
+}
+
+func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- string) {
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Video and File start\", , \"progress\": 41}"
+	videoRootPath := info.FilePath + "\\FileStorage\\Video"
+	fileRootPath := info.FilePath + "\\FileStorage\\File"
+	cacheRootPath := info.FilePath + "\\FileStorage\\Cache"
+	rootPaths := []string{videoRootPath, fileRootPath, cacheRootPath}
+	var wg sync.WaitGroup
+	taskChan := make(chan [2]string, 100)
+	go func() {
+		for _, rootPath := range rootPaths {
+			log.Println(rootPath)
+			err := filepath.Walk(rootPath, func(path string, finfo os.FileInfo, err error) error {
+				if err != nil {
+					log.Printf("filepath.Walk：%v\n", err)
+					return err
+				}
+
+				if !finfo.IsDir() {
+					expFile := expPath + path[len(info.FilePath):]
+					_, err := os.Stat(filepath.Dir(expFile))
+					if err != nil {
+						os.MkdirAll(filepath.Dir(expFile), 0644)
+					}
+
+					_, err = os.Stat(expFile)
+					if err == nil {
+						return nil
+					}
+					task := [2]string{path, expFile}
+					taskChan <- task
+					return nil
+				}
+
+				return nil
+			})
+			if err != nil {
+				log.Println("filepath.Walk:", err)
+				progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%v\"}", err)
+			}
+		}
+		close(taskChan)
+	}()
+
+	for i := 1; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				_, err := copyFile(task[0], task[1])
+				if err != nil {
+					log.Println("DecryptDat:", err)
+					progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"copyFile %v\"}", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Video and File end\", \"progress\": 60}"
+}
+
+func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Dat start\", \"progress\": 21}"
+	datRootPath := info.FilePath + "\\FileStorage\\MsgAttach"
+	fileInfo, err := os.Stat(datRootPath)
+	if err != nil || !fileInfo.IsDir() {
+		progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%s error\"}", datRootPath)
+		return
+	}
+
+	var wg sync.WaitGroup
+	taskChan := make(chan [2]string, 100)
+	go func() {
+		err = filepath.Walk(datRootPath, func(path string, finfo os.FileInfo, err error) error {
+			if err != nil {
+				log.Printf("filepath.Walk：%v\n", err)
+				return err
+			}
+
+			if !finfo.IsDir() && strings.HasSuffix(path, ".dat") {
+				expFile := expPath + path[len(info.FilePath):]
+				_, err := os.Stat(filepath.Dir(expFile))
+				if err != nil {
+					os.MkdirAll(filepath.Dir(expFile), 0644)
+				}
+
+				_, err = os.Stat(expFile)
+				if err == nil {
+					return nil
+				}
+
+				task := [2]string{path, expFile}
+				taskChan <- task
+				return nil
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			log.Println("filepath.Walk:", err)
+			progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%v\"}", err)
+		}
+		close(taskChan)
+	}()
+
+	for i := 1; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				err = DecryptDat(task[0], task[1])
+				if err != nil {
+					log.Println("DecryptDat:", err)
+					progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"DecryptDat %v\"}", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Dat end\", \"progress\": 40}"
+}
+
+func exportWeChatDateBase(info WeChatInfo, expPath string, progress chan<- string) bool {
+
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat DateBase start\", \"progress\": 1}"
+
+	dbKey, err := hex.DecodeString(info.DBKey)
+	if err != nil {
+		log.Println("DecodeString:", err)
+		progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%v\"}", err)
+		return false
+	}
+
+	var wg sync.WaitGroup
+	taskChan := make(chan [2]string, 20)
+	go func() {
+		err = filepath.Walk(info.FilePath+"\\Msg", func(path string, finfo os.FileInfo, err error) error {
+			if err != nil {
+				log.Printf("filepath.Walk：%v\n", err)
+				return err
+			}
+			if !finfo.IsDir() && strings.HasSuffix(path, ".db") {
+				expFile := expPath + path[len(info.FilePath):]
+				_, err := os.Stat(filepath.Dir(expFile))
+				if err != nil {
+					os.MkdirAll(filepath.Dir(expFile), 0644)
+				}
+
+				task := [2]string{path, expFile}
+				taskChan <- task
+			}
+
+			return nil
+		})
+		if err != nil {
+			log.Println("filepath.Walk:", err)
+			progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%v\"}", err)
+		}
+		close(taskChan)
+	}()
+
+	for i := 1; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				if filepath.Base(task[0]) == "xInfo.db" {
+					copyFile(task[0], task[1])
+				} else {
+					err = DecryptDataBase(task[0], dbKey, task[1])
+					if err != nil {
+						log.Println("DecryptDataBase:", err)
+						progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%s %v\"}", task[0], err)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat DateBase end\", \"progress\": 20}"
+	return true
+}
+
+func GetWeChatInfo() (info WeChatInfo, rerr error) {
+	info = WeChatInfo{}
+	processes, err := process.Processes()
+	if err != nil {
+		log.Println("Error getting processes:", err)
+		rerr = err
+		return
+	}
+
+	found := false
+	for _, p := range processes {
+		name, err := p.Name()
+		if err != nil {
+			continue
+		}
+		if name == "WeChat.exe" {
+			found = true
+			info.ProcessID = uint32(p.Pid)
+			info.Is64Bits, _ = Is64BitProcess(info.ProcessID)
+			log.Println("ProcessID", info.ProcessID)
+			files, err := p.OpenFiles()
+			if err != nil {
+				log.Println("OpenFiles failed")
+				return
+			}
+
+			for _, f := range files {
+				if strings.HasSuffix(f.Path, "\\Media.db") {
+					// fmt.Printf("opened %s\n", f.Path[4:])
+					filePath := f.Path[4:]
+					parts := strings.Split(filePath, string(filepath.Separator))
+					if len(parts) < 4 {
+						return info, errors.New("Error filePath " + filePath)
+					}
+					info.FilePath = strings.Join(parts[:len(parts)-2], string(filepath.Separator))
+					info.AcountName = strings.Join(parts[len(parts)-3:len(parts)-2], string(filepath.Separator))
+				}
+
+			}
+
+			if len(info.FilePath) == 0 {
+				rerr = errors.New("wechat not log in")
+				return
+			}
+
+			hModuleSnap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE|windows.TH32CS_SNAPMODULE32, uint32(p.Pid))
+			if err != nil {
+				log.Println("CreateToolhelp32Snapshot failed", err)
+				return
+			}
+			defer windows.CloseHandle(hModuleSnap)
+
+			var me32 windows.ModuleEntry32
+			me32.Size = uint32(windows.SizeofModuleEntry32)
+
+			err = windows.Module32First(hModuleSnap, &me32)
+			if err != nil {
+				log.Println("Module32First failed", err)
+				return
+			}
+
+			for ; err == nil; err = windows.Module32Next(hModuleSnap, &me32) {
+				if windows.UTF16ToString(me32.Module[:]) == "WeChatWin.dll" {
+					// fmt.Printf("MODULE NAME: %s\n", windows.UTF16ToString(me32.Module[:]))
+					// fmt.Printf("executable NAME: %s\n", windows.UTF16ToString(me32.ExePath[:]))
+					// fmt.Printf("base address: 0x%08X\n", me32.ModBaseAddr)
+					// fmt.Printf("base ModBaseSize: %d\n", me32.ModBaseSize)
+					info.DllBaseAddr = me32.ModBaseAddr
+					info.DllBaseSize = me32.ModBaseSize
+
+					var zero windows.Handle
+					driverPath := windows.UTF16ToString(me32.ExePath[:])
+					infoSize, err := windows.GetFileVersionInfoSize(driverPath, &zero)
+					if err != nil {
+						log.Println("GetFileVersionInfoSize failed", err)
+						return
+					}
+					versionInfo := make([]byte, infoSize)
+					if err = windows.GetFileVersionInfo(driverPath, 0, infoSize, unsafe.Pointer(&versionInfo[0])); err != nil {
+						log.Println("GetFileVersionInfo failed", err)
+						return
+					}
+					var fixedInfo *windows.VS_FIXEDFILEINFO
+					fixedInfoLen := uint32(unsafe.Sizeof(*fixedInfo))
+					err = windows.VerQueryValue(unsafe.Pointer(&versionInfo[0]), `\`, (unsafe.Pointer)(&fixedInfo), &fixedInfoLen)
+					if err != nil {
+						log.Println("VerQueryValue failed", err)
+						return
+					}
+					// fmt.Printf("%s: v%d.%d.%d.%d\n", windows.UTF16ToString(me32.Module[:]),
+					// 	(fixedInfo.FileVersionMS>>16)&0xff,
+					// 	(fixedInfo.FileVersionMS>>0)&0xff,
+					// 	(fixedInfo.FileVersionLS>>16)&0xff,
+					// 	(fixedInfo.FileVersionLS>>0)&0xff)
+
+					info.Version = fmt.Sprintf("%d.%d.%d.%d",
+						(fixedInfo.FileVersionMS>>16)&0xff,
+						(fixedInfo.FileVersionMS>>0)&0xff,
+						(fixedInfo.FileVersionLS>>16)&0xff,
+						(fixedInfo.FileVersionLS>>0)&0xff)
+					break
+				}
+			}
+		}
+	}
+
+	if !found {
+		rerr = errors.New("not found process")
+	}
+
+	return
+}
+
+func Is64BitProcess(pid uint32) (bool, error) {
+	is64Bit := false
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, pid)
+	if err != nil {
+		log.Println("Error opening process:", err)
+		return is64Bit, errors.New("OpenProcess failed")
+	}
+	defer windows.CloseHandle(handle)
+
+	err = windows.IsWow64Process(handle, &is64Bit)
+	if err != nil {
+		log.Println("Error IsWow64Process:", err)
+	}
+	return !is64Bit, err
+}
+
+func GetWeChatKey(info *WeChatInfo) string {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, uint32(info.ProcessID))
+	if err != nil {
+		log.Println("Error opening process:", err)
+		return ""
+	}
+	defer windows.CloseHandle(handle)
+
+	buffer := make([]byte, info.DllBaseSize)
+	err = windows.ReadProcessMemory(handle, uintptr(info.DllBaseAddr), &buffer[0], uintptr(len(buffer)), nil)
+	if err != nil {
+		log.Println("Error ReadProcessMemory:", err)
+		return ""
+	}
+
+	offset := 0
+	// searchStr := []byte(info.AcountName)
+	for {
+		index := hasDeviceSybmol(buffer[offset:])
+		if index == -1 {
+			fmt.Println("hasDeviceSybmolxxxx")
+			break
+		}
+		fmt.Printf("hasDeviceSybmol: 0x%X\n", index)
+		keys := findDBKeyPtr(buffer[offset:index], info.Is64Bits)
+		// fmt.Println("keys:", keys)
+
+		key, err := findDBkey(handle, info.FilePath+"\\Msg\\Media.db", keys)
+		if err == nil {
+			// fmt.Println("key:", key)
+			return key
+		}
+
+		offset += (index + 20)
+	}
+
+	return ""
+}
+
+func hasDeviceSybmol(buffer []byte) int {
+	sybmols := [...][]byte{
+		{'a', 'n', 'd', 'r', 'o', 'i', 'd', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00},
+		{'i', 'p', 'h', 'o', 'n', 'e', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00},
+		{'i', 'p', 'a', 'd', 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00},
+	}
+	for _, syb := range sybmols {
+		if index := bytes.Index(buffer, syb); index != -1 {
+			return index
+		}
+	}
+
+	return -1
+}
+
+func findDBKeyPtr(buffer []byte, is64Bits bool) [][]byte {
+	keys := make([][]byte, 0)
+	step := 8
+	keyLen := []byte{0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	if !is64Bits {
+		keyLen = keyLen[:4]
+		step = 4
+	}
+
+	offset := len(buffer) - step
+	for {
+		if bytes.Contains(buffer[offset:offset+step], keyLen) {
+			keys = append(keys, buffer[offset-step:offset])
+		}
+
+		offset -= step
+		if offset <= 0 {
+			break
+		}
+	}
+
+	return keys
+}
+
+func findDBkey(handle windows.Handle, path string, keys [][]byte) (string, error) {
+	var keyAddrPtr uint64
+	addrBuffer := make([]byte, 0x08)
+	for _, key := range keys {
+		copy(addrBuffer, key)
+		err := binary.Read(bytes.NewReader(addrBuffer), binary.LittleEndian, &keyAddrPtr)
+		if err != nil {
+			log.Println("binary.Read:", err)
+			continue
+		}
+		if keyAddrPtr == 0x00 {
+			continue
+		}
+		log.Println("keyAddrPtr: 0x%X\n", keyAddrPtr)
+		keyBuffer := make([]byte, 0x20)
+		err = windows.ReadProcessMemory(handle, uintptr(keyAddrPtr), &keyBuffer[0], uintptr(len(keyBuffer)), nil)
+		if err != nil {
+			// fmt.Println("Error ReadProcessMemory:", err)
+			continue
+		}
+		if checkDataBaseKey(path, keyBuffer) {
+			return hex.EncodeToString(keyBuffer), nil
+		}
+	}
+
+	return "", errors.New("not found key")
+}
+
+func checkDataBaseKey(path string, password []byte) bool {
+	fp, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer fp.Close()
+
+	fpReader := bufio.NewReaderSize(fp, defaultPageSize*100)
+
+	buffer := make([]byte, defaultPageSize)
+
+	n, err := fpReader.Read(buffer)
+	if err != nil && n != defaultPageSize {
+		log.Println("read failed:", err, n)
+		return false
+	}
+
+	salt := buffer[:16]
+	key := pbkdf2HMAC(password, salt, defaultIter, keySize)
+
+	page1 := buffer[16:defaultPageSize]
+
+	macSalt := xorBytes(salt, 0x3a)
+	macKey := pbkdf2HMAC(key, macSalt, 2, keySize)
+
+	hashMac := hmac.New(sha1.New, macKey)
+	hashMac.Write(page1[:len(page1)-32])
+	hashMac.Write([]byte{1, 0, 0, 0})
+
+	return hmac.Equal(hashMac.Sum(nil), page1[len(page1)-32:len(page1)-12])
+}
+
+func (info WeChatInfo) String() string {
+	return fmt.Sprintf("PID: %d\nVersion: v%s\nBaseAddr: 0x%08X\nDllSize: %d\nIs 64Bits: %v\nFilePath %s\nAcountName: %s",
+		info.ProcessID, info.Version, info.DllBaseAddr, info.DllBaseSize, info.Is64Bits, info.FilePath, info.AcountName)
+}
+
+func copyFile(src, dst string) (int64, error) {
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer destFile.Close()
+
+	bytesWritten, err := io.Copy(destFile, sourceFile)
+	if err != nil {
+		return bytesWritten, err
+	}
+
+	return bytesWritten, nil
+}
+
+func silkToMp3(amrBuf []byte, mp3Path string) error {
+	amrReader := bytes.NewReader(amrBuf)
+
+	var pcmBuffer bytes.Buffer
+	sr := silk.NewWriter(&pcmBuffer)
+	sr.Decoder.SetSampleRate(24000)
+	amrReader.WriteTo(sr)
+	sr.Close()
+
+	if pcmBuffer.Len() == 0 {
+		return errors.New("silk to mp3 failed " + mp3Path)
+	}
+
+	of, err := os.Create(mp3Path)
+	if err != nil {
+		return nil
+	}
+	defer of.Close()
+
+	wr := lame.NewWriter(of)
+	wr.Encoder.SetInSamplerate(24000)
+	wr.Encoder.SetNumChannels(1)
+	wr.Encoder.SetBitrate(16)
+	wr.Encoder.SetQuality(7)
+	// IMPORTANT!
+	wr.Encoder.InitParams()
+
+	pcmBuffer.WriteTo(wr)
+	wr.Close()
+
+	return nil
+}
