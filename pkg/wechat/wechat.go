@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 	"wechatDataBackup/pkg/lame"
 	"wechatDataBackup/pkg/silk"
@@ -82,8 +84,21 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 		}
 	}
 
+	handleNumber := int64(0)
+	fileNumber := int64(0)
+	index := 0
+	for {
+		mediaMSGDB := fmt.Sprintf("%s\\Msg\\Multi\\MediaMSG%d.db", expPath, index)
+		_, err := os.Stat(mediaMSGDB)
+		if err != nil {
+			break
+		}
+		index += 1
+		fileNumber += 1
+	}
+
 	var wg sync.WaitGroup
-	index := -1
+	index = -1
 	MSGChan := make(chan wechatMediaMSG, 100)
 	go func() {
 		for {
@@ -117,6 +132,7 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 
 				MSGChan <- msg
 			}
+			atomic.AddInt64(&handleNumber, 1)
 		}
 		close(MSGChan)
 	}()
@@ -139,6 +155,22 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 			}
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			if handleNumber >= fileNumber {
+				break
+			}
+			filePercent := float64(handleNumber) / float64(fileNumber)
+			totalPercent := 61 + (filePercent * (100 - 61))
+			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat voice doing\", \"progress\": %d}", int(totalPercent))
+			progress <- totalPercentStr
+			time.Sleep(time.Second)
+		}
+	}()
+
 	wg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat voice end\", \"progress\": 100}"
 }
@@ -149,6 +181,14 @@ func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- s
 	fileRootPath := info.FilePath + "\\FileStorage\\File"
 	cacheRootPath := info.FilePath + "\\FileStorage\\Cache"
 	rootPaths := []string{videoRootPath, fileRootPath, cacheRootPath}
+
+	handleNumber := int64(0)
+	fileNumber := int64(0)
+	for _, path := range rootPaths {
+		fileNumber += getPathFileNumber(path, "")
+	}
+	log.Println("VideoAndFile ", fileNumber)
+
 	var wg sync.WaitGroup
 	taskChan := make(chan [2]string, 100)
 	go func() {
@@ -167,10 +207,6 @@ func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- s
 						os.MkdirAll(filepath.Dir(expFile), 0644)
 					}
 
-					_, err = os.Stat(expFile)
-					if err == nil {
-						return nil
-					}
 					task := [2]string{path, expFile}
 					taskChan <- task
 					return nil
@@ -191,14 +227,34 @@ func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- s
 		go func() {
 			defer wg.Done()
 			for task := range taskChan {
-				_, err := copyFile(task[0], task[1])
+				_, err := os.Stat(task[1])
+				if err == nil {
+					atomic.AddInt64(&handleNumber, 1)
+					continue
+				}
+				_, err = copyFile(task[0], task[1])
 				if err != nil {
 					log.Println("DecryptDat:", err)
 					progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"copyFile %v\"}", err)
 				}
+				atomic.AddInt64(&handleNumber, 1)
 			}
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			if handleNumber >= fileNumber {
+				break
+			}
+			filePercent := float64(handleNumber) / float64(fileNumber)
+			totalPercent := 41 + (filePercent * (60 - 41))
+			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Video and File doing\", \"progress\": %d}", int(totalPercent))
+			progress <- totalPercentStr
+			time.Sleep(time.Second)
+		}
+	}()
 	wg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Video and File end\", \"progress\": 60}"
 }
@@ -212,6 +268,8 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 		return
 	}
 
+	handleNumber := int64(0)
+	fileNumber := getPathFileNumber(datRootPath, ".dat")
 	var wg sync.WaitGroup
 	taskChan := make(chan [2]string, 100)
 	go func() {
@@ -226,11 +284,6 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 				_, err := os.Stat(filepath.Dir(expFile))
 				if err != nil {
 					os.MkdirAll(filepath.Dir(expFile), 0644)
-				}
-
-				_, err = os.Stat(expFile)
-				if err == nil {
-					return nil
 				}
 
 				task := [2]string{path, expFile}
@@ -253,14 +306,35 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 		go func() {
 			defer wg.Done()
 			for task := range taskChan {
+				_, err = os.Stat(task[1])
+				if err == nil {
+					atomic.AddInt64(&handleNumber, 1)
+					continue
+				}
 				err = DecryptDat(task[0], task[1])
 				if err != nil {
 					log.Println("DecryptDat:", err)
 					progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"DecryptDat %v\"}", err)
 				}
+				atomic.AddInt64(&handleNumber, 1)
 			}
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			if handleNumber >= fileNumber {
+				break
+			}
+
+			filePercent := float64(handleNumber) / float64(fileNumber)
+			totalPercent := 21 + (filePercent * (40 - 21))
+			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Dat doing\", \"progress\": %d}", int(totalPercent))
+			progress <- totalPercentStr
+			time.Sleep(time.Second)
+		}
+	}()
 	wg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Dat end\", \"progress\": 40}"
 }
@@ -276,6 +350,8 @@ func exportWeChatDateBase(info WeChatInfo, expPath string, progress chan<- strin
 		return false
 	}
 
+	handleNumber := int64(0)
+	fileNumber := getPathFileNumber(info.FilePath+"\\Msg", ".db")
 	var wg sync.WaitGroup
 	taskChan := make(chan [2]string, 20)
 	go func() {
@@ -318,9 +394,25 @@ func exportWeChatDateBase(info WeChatInfo, expPath string, progress chan<- strin
 						progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%s %v\"}", task[0], err)
 					}
 				}
+				atomic.AddInt64(&handleNumber, 1)
 			}
 		}()
 	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			if handleNumber >= fileNumber {
+				break
+			}
+			filePercent := float64(handleNumber) / float64(fileNumber)
+			totalPercent := 1 + (filePercent * (20 - 1))
+			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat DateBase doing\", \"progress\": %d}", int(totalPercent))
+			progress <- totalPercentStr
+			time.Sleep(time.Second)
+		}
+	}()
 	wg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat DateBase end\", \"progress\": 20}"
 	return true
@@ -650,4 +742,25 @@ func silkToMp3(amrBuf []byte, mp3Path string) error {
 	wr.Close()
 
 	return nil
+}
+
+func getPathFileNumber(targetPath string, fileSuffix string) int64 {
+
+	number := int64(0)
+	err := filepath.Walk(targetPath, func(path string, finfo os.FileInfo, err error) error {
+		if err != nil {
+			log.Printf("filepath.Walk：%v\n", err)
+			return err
+		}
+		if !finfo.IsDir() && strings.HasSuffix(path, fileSuffix) {
+			number += 1
+		}
+
+		return nil
+	})
+	if err != nil {
+		log.Println("filepath.Walk:", err)
+	}
+
+	return number
 }

@@ -18,7 +18,7 @@ const (
 	defaultConfig        = "config"
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
-	appVersion           = "v1.0.0"
+	appVersion           = "v1.0.1"
 )
 
 // App struct
