@@ -266,7 +266,7 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 	List := &WeChatSessionList{}
 	List.Rows = make([]WeChatSession, 0)
 
-	querySql := fmt.Sprintf("select ifnull(strUsrName,'') as strUsrName,ifnull(strNickName,'') as strNickName,ifnull(strContent,'') as strContent, nTime from Session order by rowid desc limit %d, %d;", pageIndex*pageSize, pageSize)
+	querySql := fmt.Sprintf("select ifnull(strUsrName,'') as strUsrName,ifnull(strNickName,'') as strNickName,ifnull(strContent,'') as strContent, nTime from Session order by nOrder desc limit %d, %d;", pageIndex*pageSize, pageSize)
 	dbRows, err := P.microMsg.Query(querySql)
 	if err != nil {
 		log.Println(err)
