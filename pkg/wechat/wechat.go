@@ -38,22 +38,25 @@ type WeChatInfo struct {
 	DBKey       string
 }
 
+type WeChatInfoList struct {
+	Info  []WeChatInfo `json:"Info"`
+	Total int          `json:"Total"`
+}
+
 type wechatMediaMSG struct {
 	Key      string
 	MsgSvrID int
 	Buf      []byte
 }
 
-func GetWeChatAllInfo() (WeChatInfo, error) {
-	info, err := GetWeChatInfo()
-	if err != nil {
-		log.Println("GetWeChatInfo:", err)
-		return info, err
+func GetWeChatAllInfo() *WeChatInfoList {
+	list := GetWeChatInfo()
+
+	for i := range list.Info {
+		list.Info[i].DBKey = GetWeChatKey(&list.Info[i])
 	}
 
-	info.DBKey = GetWeChatKey(&info)
-
-	return info, nil
+	return list
 }
 
 func ExportWeChatAllData(info WeChatInfo, expPath string, progress chan<- string) {
@@ -98,6 +101,8 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 	}
 
 	var wg sync.WaitGroup
+	var reportWg sync.WaitGroup
+	quitChan := make(chan struct{})
 	index = -1
 	MSGChan := make(chan wechatMediaMSG, 100)
 	go func() {
@@ -156,22 +161,27 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 		}()
 	}
 
-	wg.Add(1)
+	reportWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer reportWg.Done()
 		for {
-			if handleNumber >= fileNumber {
-				break
+			select {
+			case <-quitChan:
+				log.Println("WeChat voice report progress end")
+				return
+			default:
+				filePercent := float64(handleNumber) / float64(fileNumber)
+				totalPercent := 61 + (filePercent * (100 - 61))
+				totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat voice doing\", \"progress\": %d}", int(totalPercent))
+				progress <- totalPercentStr
+				time.Sleep(time.Second)
 			}
-			filePercent := float64(handleNumber) / float64(fileNumber)
-			totalPercent := 61 + (filePercent * (100 - 61))
-			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat voice doing\", \"progress\": %d}", int(totalPercent))
-			progress <- totalPercentStr
-			time.Sleep(time.Second)
 		}
 	}()
 
 	wg.Wait()
+	close(quitChan)
+	reportWg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat voice end\", \"progress\": 100}"
 }
 
@@ -190,6 +200,8 @@ func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- s
 	log.Println("VideoAndFile ", fileNumber)
 
 	var wg sync.WaitGroup
+	var reportWg sync.WaitGroup
+	quitChan := make(chan struct{})
 	taskChan := make(chan [2]string, 100)
 	go func() {
 		for _, rootPath := range rootPaths {
@@ -241,21 +253,26 @@ func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- s
 			}
 		}()
 	}
-	wg.Add(1)
+	reportWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer reportWg.Done()
 		for {
-			if handleNumber >= fileNumber {
-				break
+			select {
+			case <-quitChan:
+				log.Println("WeChat Video and File report progress end")
+				return
+			default:
+				filePercent := float64(handleNumber) / float64(fileNumber)
+				totalPercent := 41 + (filePercent * (60 - 41))
+				totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Video and File doing\", \"progress\": %d}", int(totalPercent))
+				progress <- totalPercentStr
+				time.Sleep(time.Second)
 			}
-			filePercent := float64(handleNumber) / float64(fileNumber)
-			totalPercent := 41 + (filePercent * (60 - 41))
-			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Video and File doing\", \"progress\": %d}", int(totalPercent))
-			progress <- totalPercentStr
-			time.Sleep(time.Second)
 		}
 	}()
 	wg.Wait()
+	close(quitChan)
+	reportWg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Video and File end\", \"progress\": 60}"
 }
 
@@ -271,6 +288,8 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 	handleNumber := int64(0)
 	fileNumber := getPathFileNumber(datRootPath, ".dat")
 	var wg sync.WaitGroup
+	var reportWg sync.WaitGroup
+	quitChan := make(chan struct{})
 	taskChan := make(chan [2]string, 100)
 	go func() {
 		err = filepath.Walk(datRootPath, func(path string, finfo os.FileInfo, err error) error {
@@ -320,22 +339,26 @@ func exportWeChatBat(info WeChatInfo, expPath string, progress chan<- string) {
 			}
 		}()
 	}
-	wg.Add(1)
+	reportWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer reportWg.Done()
 		for {
-			if handleNumber >= fileNumber {
-				break
+			select {
+			case <-quitChan:
+				log.Println("WeChat Dat report progress end")
+				return
+			default:
+				filePercent := float64(handleNumber) / float64(fileNumber)
+				totalPercent := 21 + (filePercent * (40 - 21))
+				totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Dat doing\", \"progress\": %d}", int(totalPercent))
+				progress <- totalPercentStr
+				time.Sleep(time.Second)
 			}
-
-			filePercent := float64(handleNumber) / float64(fileNumber)
-			totalPercent := 21 + (filePercent * (40 - 21))
-			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Dat doing\", \"progress\": %d}", int(totalPercent))
-			progress <- totalPercentStr
-			time.Sleep(time.Second)
 		}
 	}()
 	wg.Wait()
+	close(quitChan)
+	reportWg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Dat end\", \"progress\": 40}"
 }
 
@@ -353,6 +376,8 @@ func exportWeChatDateBase(info WeChatInfo, expPath string, progress chan<- strin
 	handleNumber := int64(0)
 	fileNumber := getPathFileNumber(info.FilePath+"\\Msg", ".db")
 	var wg sync.WaitGroup
+	var reportWg sync.WaitGroup
+	quitChan := make(chan struct{})
 	taskChan := make(chan [2]string, 20)
 	go func() {
 		err = filepath.Walk(info.FilePath+"\\Msg", func(path string, finfo os.FileInfo, err error) error {
@@ -399,49 +424,55 @@ func exportWeChatDateBase(info WeChatInfo, expPath string, progress chan<- strin
 		}()
 	}
 
-	wg.Add(1)
+	reportWg.Add(1)
 	go func() {
-		defer wg.Done()
+		defer reportWg.Done()
 		for {
-			if handleNumber >= fileNumber {
-				break
+			select {
+			case <-quitChan:
+				log.Println("WeChat DateBase report progress end")
+				return
+			default:
+				filePercent := float64(handleNumber) / float64(fileNumber)
+				totalPercent := 1 + (filePercent * (20 - 1))
+				totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat DateBase doing\", \"progress\": %d}", int(totalPercent))
+				progress <- totalPercentStr
+				time.Sleep(time.Second)
 			}
-			filePercent := float64(handleNumber) / float64(fileNumber)
-			totalPercent := 1 + (filePercent * (20 - 1))
-			totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat DateBase doing\", \"progress\": %d}", int(totalPercent))
-			progress <- totalPercentStr
-			time.Sleep(time.Second)
 		}
 	}()
 	wg.Wait()
+	close(quitChan)
+	reportWg.Wait()
 	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat DateBase end\", \"progress\": 20}"
 	return true
 }
 
-func GetWeChatInfo() (info WeChatInfo, rerr error) {
-	info = WeChatInfo{}
+func GetWeChatInfo() (list *WeChatInfoList) {
+	list = &WeChatInfoList{}
+	list.Info = make([]WeChatInfo, 0)
+	list.Total = 0
+
 	processes, err := process.Processes()
 	if err != nil {
 		log.Println("Error getting processes:", err)
-		rerr = err
 		return
 	}
 
-	found := false
 	for _, p := range processes {
 		name, err := p.Name()
 		if err != nil {
 			continue
 		}
+		info := WeChatInfo{}
 		if name == "WeChat.exe" {
-			found = true
 			info.ProcessID = uint32(p.Pid)
 			info.Is64Bits, _ = Is64BitProcess(info.ProcessID)
 			log.Println("ProcessID", info.ProcessID)
 			files, err := p.OpenFiles()
 			if err != nil {
 				log.Println("OpenFiles failed")
-				return
+				continue
 			}
 
 			for _, f := range files {
@@ -450,7 +481,8 @@ func GetWeChatInfo() (info WeChatInfo, rerr error) {
 					filePath := f.Path[4:]
 					parts := strings.Split(filePath, string(filepath.Separator))
 					if len(parts) < 4 {
-						return info, errors.New("Error filePath " + filePath)
+						log.Println("Error filePath " + filePath)
+						break
 					}
 					info.FilePath = strings.Join(parts[:len(parts)-2], string(filepath.Separator))
 					info.AcountName = strings.Join(parts[len(parts)-3:len(parts)-2], string(filepath.Separator))
@@ -459,14 +491,14 @@ func GetWeChatInfo() (info WeChatInfo, rerr error) {
 			}
 
 			if len(info.FilePath) == 0 {
-				rerr = errors.New("wechat not log in")
-				return
+				log.Println("wechat not log in")
+				continue
 			}
 
 			hModuleSnap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE|windows.TH32CS_SNAPMODULE32, uint32(p.Pid))
 			if err != nil {
 				log.Println("CreateToolhelp32Snapshot failed", err)
-				return
+				continue
 			}
 			defer windows.CloseHandle(hModuleSnap)
 
@@ -476,7 +508,7 @@ func GetWeChatInfo() (info WeChatInfo, rerr error) {
 			err = windows.Module32First(hModuleSnap, &me32)
 			if err != nil {
 				log.Println("Module32First failed", err)
-				return
+				continue
 			}
 
 			for ; err == nil; err = windows.Module32Next(hModuleSnap, &me32) {
@@ -493,19 +525,19 @@ func GetWeChatInfo() (info WeChatInfo, rerr error) {
 					infoSize, err := windows.GetFileVersionInfoSize(driverPath, &zero)
 					if err != nil {
 						log.Println("GetFileVersionInfoSize failed", err)
-						return
+						break
 					}
 					versionInfo := make([]byte, infoSize)
 					if err = windows.GetFileVersionInfo(driverPath, 0, infoSize, unsafe.Pointer(&versionInfo[0])); err != nil {
 						log.Println("GetFileVersionInfo failed", err)
-						return
+						break
 					}
 					var fixedInfo *windows.VS_FIXEDFILEINFO
 					fixedInfoLen := uint32(unsafe.Sizeof(*fixedInfo))
 					err = windows.VerQueryValue(unsafe.Pointer(&versionInfo[0]), `\`, (unsafe.Pointer)(&fixedInfo), &fixedInfoLen)
 					if err != nil {
 						log.Println("VerQueryValue failed", err)
-						return
+						break
 					}
 					// fmt.Printf("%s: v%d.%d.%d.%d\n", windows.UTF16ToString(me32.Module[:]),
 					// 	(fixedInfo.FileVersionMS>>16)&0xff,
@@ -518,16 +550,13 @@ func GetWeChatInfo() (info WeChatInfo, rerr error) {
 						(fixedInfo.FileVersionMS>>0)&0xff,
 						(fixedInfo.FileVersionLS>>16)&0xff,
 						(fixedInfo.FileVersionLS>>0)&0xff)
+					list.Info = append(list.Info, info)
+					list.Total += 1
 					break
 				}
 			}
 		}
 	}
-
-	if !found {
-		rerr = errors.New("not found process")
-	}
-
 	return
 }
 
@@ -567,7 +596,7 @@ func GetWeChatKey(info *WeChatInfo) string {
 	for {
 		index := hasDeviceSybmol(buffer[offset:])
 		if index == -1 {
-			fmt.Println("hasDeviceSybmolxxxx")
+			log.Println("hasDeviceSybmolxxxx")
 			break
 		}
 		fmt.Printf("hasDeviceSybmol: 0x%X\n", index)
@@ -638,7 +667,7 @@ func findDBkey(handle windows.Handle, path string, keys [][]byte) (string, error
 		if keyAddrPtr == 0x00 {
 			continue
 		}
-		log.Println("keyAddrPtr: 0x%X\n", keyAddrPtr)
+		log.Printf("keyAddrPtr: 0x%X\n", keyAddrPtr)
 		keyBuffer := make([]byte, 0x20)
 		err = windows.ReadProcessMemory(handle, uintptr(keyAddrPtr), &keyBuffer[0], uintptr(len(keyBuffer)), nil)
 		if err != nil {

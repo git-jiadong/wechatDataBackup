@@ -18,16 +18,17 @@ const (
 	defaultConfig        = "config"
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
-	appVersion           = "v1.0.2"
+	appVersion           = "v1.0.3"
 )
 
 // App struct
 type App struct {
 	ctx         context.Context
-	info        wechat.WeChatInfo
+	infoList    *wechat.WeChatInfoList
 	provider    *wechat.WechatDataProvider
 	defaultUser string
 	users       []string
+	firstStart  bool
 }
 
 type WeChatInfo struct {
@@ -37,6 +38,17 @@ type WeChatInfo struct {
 	Version    string `json:"Version"`
 	Is64Bits   bool   `json:"Is64Bits"`
 	DBKey      string `json:"DBkey"`
+}
+
+type WeChatInfoList struct {
+	Info  []WeChatInfo `json:"Info"`
+	Total int          `json:"Total"`
+}
+
+type WeChatAccountInfos struct {
+	CurrentAccount string                     `json:"CurrentAccount"`
+	Info           []wechat.WeChatAccountInfo `json:"Info"`
+	Total          int                        `json:"Total"`
 }
 
 // NewApp creates a new App application struct
@@ -52,6 +64,7 @@ func NewApp() *App {
 		// log.Println(a.defaultUser)
 		// log.Println(a.users)
 	} else {
+		a.firstStart = true
 		log.Println("not config exist")
 	}
 
@@ -65,39 +78,41 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
-	dialog, err := runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
-		Type:    runtime.QuestionDialog,
-		Title:   "Quit?",
-		Message: "Are you sure you want to quit?",
-	})
 
-	if err != nil || dialog == "Yes" {
+	if a.provider != nil {
 		a.provider.WechatWechatDataProviderClose()
 		a.provider = nil
-		return false
 	}
 
-	return true
+	return false
+
 }
 
 func (a *App) GetWeChatAllInfo() string {
-	a.info, _ = wechat.GetWeChatAllInfo()
+	infoList := WeChatInfoList{}
+	infoList.Info = make([]WeChatInfo, 0)
+	infoList.Total = 0
 
-	var info WeChatInfo
-	info.ProcessID = a.info.ProcessID
-	info.FilePath = a.info.FilePath
-	info.AcountName = a.info.AcountName
-	info.Version = a.info.Version
-	info.Is64Bits = a.info.Is64Bits
-	info.DBKey = a.info.DBKey
-
-	infoStr, _ := json.Marshal(info)
-	log.Println(string(infoStr))
+	a.infoList = wechat.GetWeChatAllInfo()
+	for i := range a.infoList.Info {
+		var info WeChatInfo
+		info.ProcessID = a.infoList.Info[i].ProcessID
+		info.FilePath = a.infoList.Info[i].FilePath
+		info.AcountName = a.infoList.Info[i].AcountName
+		info.Version = a.infoList.Info[i].Version
+		info.Is64Bits = a.infoList.Info[i].Is64Bits
+		info.DBKey = a.infoList.Info[i].DBKey
+		infoList.Info = append(infoList.Info, info)
+		infoList.Total += 1
+		log.Printf("ProcessID %d, FilePath %s, AcountName %s, Version %s, Is64Bits %t", info.ProcessID, info.FilePath, info.AcountName, info.Version, info.Is64Bits)
+	}
+	infoStr, _ := json.Marshal(infoList)
+	// log.Println(string(infoStr))
 
 	return string(infoStr)
 }
 
-func (a *App) ExportWeChatAllData(full bool) {
+func (a *App) ExportWeChatAllData(full bool, acountName string) {
 
 	if a.provider != nil {
 		a.provider.WechatWechatDataProviderClose()
@@ -106,13 +121,26 @@ func (a *App) ExportWeChatAllData(full bool) {
 
 	progress := make(chan string)
 	go func() {
+		var pInfo *wechat.WeChatInfo
+		for i := range a.infoList.Info {
+			if a.infoList.Info[i].AcountName == acountName {
+				pInfo = &a.infoList.Info[i]
+				break
+			}
+		}
+
+		if pInfo == nil {
+			close(progress)
+			runtime.EventsEmit(a.ctx, "exportData", fmt.Sprintf("{\"status\":\"error\", \"result\":\"%s error\"}", acountName))
+			return
+		}
 
 		_, err := os.Stat(".\\User")
 		if err != nil {
 			os.Mkdir(".\\User", os.ModeDir)
 		}
 
-		expPath := ".\\User\\" + a.info.AcountName
+		expPath := ".\\User\\" + pInfo.AcountName
 		_, err = os.Stat(expPath)
 		if err == nil {
 			if !full {
@@ -127,26 +155,23 @@ func (a *App) ExportWeChatAllData(full bool) {
 			os.Mkdir(expPath, os.ModeDir)
 		}
 
-		go wechat.ExportWeChatAllData(a.info, expPath, progress)
+		go wechat.ExportWeChatAllData(*pInfo, expPath, progress)
 
 		for p := range progress {
 			log.Println(p)
 			runtime.EventsEmit(a.ctx, "exportData", p)
 		}
 
-		if len(a.defaultUser) == 0 {
-			a.defaultUser = a.info.AcountName
-		}
-
+		a.defaultUser = pInfo.AcountName
 		hasUser := false
 		for _, user := range a.users {
-			if user == a.info.AcountName {
+			if user == pInfo.AcountName {
 				hasUser = true
 				break
 			}
 		}
 		if !hasUser {
-			a.users = append(a.users, a.info.AcountName)
+			a.users = append(a.users, pInfo.AcountName)
 		}
 		a.setCurrentConfig()
 	}()
@@ -156,6 +181,12 @@ func (a *App) createWechatDataProvider(resPath string) error {
 	if a.provider != nil && a.provider.SelfInfo != nil && filepath.Base(resPath) == a.provider.SelfInfo.UserName {
 		log.Println("WechatDataProvider not need create:", a.provider.SelfInfo.UserName)
 		return nil
+	}
+
+	if a.provider != nil {
+		a.provider.WechatWechatDataProviderClose()
+		a.provider = nil
+		log.Println("createWechatDataProvider WechatWechatDataProviderClose")
 	}
 
 	provider, err := wechat.CreateWechatDataProvider(resPath)
@@ -256,6 +287,10 @@ func (a *App) setCurrentConfig() {
 	err := viper.SafeWriteConfig()
 	if err != nil {
 		log.Println(err)
+		err = viper.WriteConfig()
+		if err != nil {
+			log.Println(err)
+		}
 	}
 }
 
@@ -301,4 +336,53 @@ func (a *App) GetWeChatRoomUserList(roomId string) string {
 
 func (a *App) GetAppVersion() string {
 	return appVersion
+}
+
+func (a *App) GetAppIsFirstStart() bool {
+	defer func() { a.firstStart = false }()
+	return a.firstStart
+}
+
+func (a *App) GetWechatLocalAccountInfo() string {
+	infos := WeChatAccountInfos{}
+	infos.Info = make([]wechat.WeChatAccountInfo, 0)
+	infos.Total = 0
+	infos.CurrentAccount = a.defaultUser
+	for i := range a.users {
+		resPath := ".\\User\\" + a.users[i]
+		if _, err := os.Stat(resPath); err != nil {
+			log.Println("GetWechatLocalAccountInfo:", resPath, err)
+			continue
+		}
+
+		info, err := wechat.WechatGetAccountInfo(resPath, a.users[i])
+		if err != nil {
+			log.Println("GetWechatLocalAccountInfo", err)
+			continue
+		}
+
+		infos.Info = append(infos.Info, *info)
+		infos.Total += 1
+	}
+
+	infoString, _ := json.Marshal(infos)
+	log.Println(string(infoString))
+
+	return string(infoString)
+}
+
+func (a *App) WechatSwitchAccount(account string) bool {
+	for i := range a.users {
+		if a.users[i] == account {
+			if a.provider != nil {
+				a.provider.WechatWechatDataProviderClose()
+				a.provider = nil
+			}
+			a.defaultUser = account
+			a.setCurrentConfig()
+			return true
+		}
+	}
+
+	return false
 }

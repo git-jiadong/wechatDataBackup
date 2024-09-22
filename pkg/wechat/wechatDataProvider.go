@@ -144,6 +144,15 @@ type WeChatUserList struct {
 	Total int              `json:"Total"`
 }
 
+type WeChatAccountInfo struct {
+	AccountName     string `json:"AccountName"`
+	AliasName       string `json:"AliasName"`
+	ReMarkName      string `json:"ReMarkName"`
+	NickName        string `json:"NickName"`
+	SmallHeadImgUrl string `json:"SmallHeadImgUrl"`
+	BigHeadImgUrl   string `json:"BigHeadImgUrl"`
+}
+
 type wechatMsgDB struct {
 	path      string
 	db        *sql.DB
@@ -220,13 +229,19 @@ func CreateWechatDataProvider(resPath string) (*WechatDataProvider, error) {
 
 func (P *WechatDataProvider) WechatWechatDataProviderClose() {
 	if P.microMsg != nil {
-		P.microMsg.Close()
+		err := P.microMsg.Close()
+		if err != nil {
+			log.Println("db close:", err)
+		}
 	}
 
 	for _, db := range P.msgDBs {
-		db.db.Close()
+		err := db.db.Close()
+		if err != nil {
+			log.Println("db close:", err)
+		}
 	}
-	log.Println("WechatWechatDataProviderClose")
+	log.Println("WechatWechatDataProviderClose:", P.resPath)
 }
 
 func (P *WechatDataProvider) WechatGetUserInfoByName(name string) (*WeChatUserInfo, error) {
@@ -875,4 +890,50 @@ func (P *WechatDataProvider) WechatGetUserInfoByNameOnCache(name string) (*WeCha
 	P.userInfoMap[name] = *pinfo
 
 	return pinfo, nil
+}
+
+func WechatGetAccountInfo(resPath, accountName string) (*WeChatAccountInfo, error) {
+	MicroMsgDBPath := resPath + "\\Msg\\" + MicroMsgDB
+	if _, err := os.Stat(MicroMsgDBPath); err != nil {
+		log.Println("MicroMsgDBPath:", MicroMsgDBPath, err)
+		return nil, err
+	}
+
+	microMsg, err := sql.Open("sqlite3", MicroMsgDBPath)
+	if err != nil {
+		log.Printf("open db %s error: %v", MicroMsgDBPath, err)
+		return nil, err
+	}
+	defer microMsg.Close()
+
+	info := &WeChatAccountInfo{}
+
+	var UserName, Alias, ReMark, NickName string
+	querySql := fmt.Sprintf("select ifnull(UserName,'') as UserName, ifnull(Alias,'') as Alias, ifnull(ReMark,'') as ReMark, ifnull(NickName,'') as NickName from Contact where UserName='%s';", accountName)
+	// log.Println(querySql)
+	err = microMsg.QueryRow(querySql).Scan(&UserName, &Alias, &ReMark, &NickName)
+	if err != nil {
+		log.Println("not found User:", err)
+		return nil, err
+	}
+
+	log.Printf("UserName %s, Alias %s, ReMark %s, NickName %s\n", UserName, Alias, ReMark, NickName)
+
+	var smallHeadImgUrl, bigHeadImgUrl string
+	querySql = fmt.Sprintf("select ifnull(smallHeadImgUrl,'') as smallHeadImgUrl, ifnull(bigHeadImgUrl,'') as bigHeadImgUrl from ContactHeadImgUrl where usrName='%s';", UserName)
+	// log.Println(querySql)
+	err = microMsg.QueryRow(querySql).Scan(&smallHeadImgUrl, &bigHeadImgUrl)
+	if err != nil {
+		log.Println("not find headimg", err)
+	}
+
+	info.AccountName = UserName
+	info.AliasName = Alias
+	info.ReMarkName = ReMark
+	info.NickName = NickName
+	info.SmallHeadImgUrl = smallHeadImgUrl
+	info.BigHeadImgUrl = bigHeadImgUrl
+
+	// log.Println(info)
+	return info, nil
 }
