@@ -5,11 +5,21 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/pkg/browser"
+	"github.com/shirou/gopsutil/v3/disk"
 	"golang.org/x/sys/windows/registry"
 )
+
+type PathStat struct {
+	Path        string  `json:"path"`
+	Total       uint64  `json:"total"`
+	Free        uint64  `json:"free"`
+	Used        uint64  `json:"used"`
+	UsedPercent float64 `json:"usedPercent"`
+}
 
 func getDefaultProgram(fileExtension string) (string, error) {
 	key, err := registry.OpenKey(registry.CLASSES_ROOT, fmt.Sprintf(`.%s`, fileExtension), registry.QUERY_VALUE)
@@ -74,4 +84,39 @@ func OpenFileOrExplorer(filePath string, explorer bool) error {
 
 	fmt.Println("Command executed successfully")
 	return nil
+}
+
+func GetPathStat(path string) (PathStat, error) {
+	pathStat := PathStat{}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return pathStat, err
+	}
+
+	stat, err := disk.Usage(absPath)
+	if err != nil {
+		return pathStat, err
+	}
+
+	pathStat.Path = stat.Path
+	pathStat.Total = stat.Total
+	pathStat.Used = stat.Used
+	pathStat.Free = stat.Free
+	pathStat.UsedPercent = stat.UsedPercent
+
+	return pathStat, nil
+}
+
+func PathIsCanWriteFile(path string) bool {
+
+	filepath := fmt.Sprintf("%s\\CanWrite.txt", path)
+	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return false
+	}
+
+	file.Close()
+	os.Remove(filepath)
+
+	return true
 }

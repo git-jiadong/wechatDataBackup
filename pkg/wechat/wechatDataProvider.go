@@ -67,6 +67,8 @@ type WeChatUserInfo struct {
 	NickName        string `json:"NickName"`
 	SmallHeadImgUrl string `json:"SmallHeadImgUrl"`
 	BigHeadImgUrl   string `json:"BigHeadImgUrl"`
+	LocalHeadImgUrl string `json:"LocalHeadImgUrl"`
+	IsGroup         bool   `json:"IsGroup"`
 }
 
 type WeChatSession struct {
@@ -75,7 +77,7 @@ type WeChatSession struct {
 	Content  string         `json:"Content"`
 	UserInfo WeChatUserInfo `json:"UserInfo"`
 	Time     uint64         `json:"Time"`
-	IsGroup  bool           `json:IsGroup`
+	IsGroup  bool           `json:"IsGroup"`
 }
 
 type WeChatSessionList struct {
@@ -144,6 +146,19 @@ type WeChatUserList struct {
 	Total int              `json:"Total"`
 }
 
+type WeChatContact struct {
+	WeChatUserInfo
+	PYInitial       string
+	QuanPin         string
+	RemarkPYInitial string
+	RemarkQuanPin   string
+}
+
+type WeChatContactList struct {
+	Users []WeChatContact `json:"Users"`
+	Total int             `json:"Total"`
+}
+
 type WeChatAccountInfo struct {
 	AccountName     string `json:"AccountName"`
 	AliasName       string `json:"AliasName"`
@@ -151,6 +166,7 @@ type WeChatAccountInfo struct {
 	NickName        string `json:"NickName"`
 	SmallHeadImgUrl string `json:"SmallHeadImgUrl"`
 	BigHeadImgUrl   string `json:"BigHeadImgUrl"`
+	LocalHeadImgUrl string `json:"LocalHeadImgUrl"`
 }
 
 type wechatMsgDB struct {
@@ -161,14 +177,16 @@ type wechatMsgDB struct {
 }
 
 type WechatDataProvider struct {
-	resPath  string
-	microMsg *sql.DB
+	resPath       string
+	prefixResPath string
+	microMsg      *sql.DB
 
 	msgDBs      []*wechatMsgDB
 	userInfoMap map[string]WeChatUserInfo
 	userInfoMtx sync.Mutex
 
-	SelfInfo *WeChatUserInfo
+	SelfInfo    *WeChatUserInfo
+	ContactList *WeChatContactList
 }
 
 const (
@@ -181,13 +199,40 @@ func (a byTime) Len() int           { return len(a) }
 func (a byTime) Less(i, j int) bool { return a[i].startTime > a[j].startTime }
 func (a byTime) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
-func CreateWechatDataProvider(resPath string) (*WechatDataProvider, error) {
+type byName []WeChatContact
+
+func (c byName) Len() int { return len(c) }
+func (c byName) Less(i, j int) bool {
+	var a, b string
+	if c[i].RemarkQuanPin != "" {
+		a = c[i].RemarkQuanPin
+	} else {
+		a = c[i].QuanPin
+	}
+
+	if c[j].RemarkQuanPin != "" {
+		b = c[j].RemarkQuanPin
+	} else {
+		b = c[j].QuanPin
+	}
+
+	return strings.Compare(a, b) < 0
+}
+func (c byName) Swap(i, j int) { c[i], c[j] = c[j], c[i] }
+
+func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProvider, error) {
 	provider := &WechatDataProvider{}
 	provider.resPath = resPath
+	provider.prefixResPath = prefixRes
 	provider.msgDBs = make([]*wechatMsgDB, 0)
 	log.Println(resPath)
+
 	userName := filepath.Base(resPath)
 	MicroMsgDBPath := resPath + "\\Msg\\" + MicroMsgDB
+	if _, err := os.Stat(MicroMsgDBPath); err != nil {
+		log.Println("CreateWechatDataProvider failed", MicroMsgDBPath, err)
+		return provider, err
+	}
 	microMsg, err := sql.Open("sqlite3", MicroMsgDBPath)
 	if err != nil {
 		log.Printf("open db %s error: %v", MicroMsgDBPath, err)
@@ -217,11 +262,19 @@ func CreateWechatDataProvider(resPath string) (*WechatDataProvider, error) {
 	}
 	provider.userInfoMap = make(map[string]WeChatUserInfo)
 	provider.microMsg = microMsg
-	provider.SelfInfo, err = provider.WechatGetUserInfoByName(userName)
+	provider.SelfInfo, err = provider.WechatGetUserInfoByNameOnCache(userName)
 	if err != nil {
 		log.Printf("WechatGetUserInfoByName %s failed: %v", userName, err)
 		return provider, err
 	}
+
+	provider.ContactList, err = provider.wechatGetAllContact()
+	if err != nil {
+		log.Println("wechatGetAllContact failed", err)
+		return provider, err
+	}
+	sort.Sort(byName(provider.ContactList.Users))
+	log.Println("Contact number:", provider.ContactList.Total)
 	provider.userInfoMap[userName] = *provider.SelfInfo
 	log.Println("resPath:", provider.resPath)
 	return provider, nil
@@ -256,7 +309,7 @@ func (P *WechatDataProvider) WechatGetUserInfoByName(name string) (*WeChatUserIn
 		return info, err
 	}
 
-	log.Printf("UserName %s, Alias %s, ReMark %s, NickName %s\n", UserName, Alias, ReMark, NickName)
+	// log.Printf("UserName %s, Alias %s, ReMark %s, NickName %s\n", UserName, Alias, ReMark, NickName)
 
 	var smallHeadImgUrl, bigHeadImgUrl string
 	querySql = fmt.Sprintf("select ifnull(smallHeadImgUrl,'') as smallHeadImgUrl, ifnull(bigHeadImgUrl,'') as bigHeadImgUrl from ContactHeadImgUrl where usrName='%s';", UserName)
@@ -272,7 +325,13 @@ func (P *WechatDataProvider) WechatGetUserInfoByName(name string) (*WeChatUserIn
 	info.NickName = NickName
 	info.SmallHeadImgUrl = smallHeadImgUrl
 	info.BigHeadImgUrl = bigHeadImgUrl
+	info.IsGroup = strings.HasSuffix(UserName, "@chatroom")
 
+	localHeadImgPath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", P.resPath, name)
+	relativePath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", P.prefixResPath, name)
+	if _, err = os.Stat(localHeadImgPath); err == nil {
+		info.LocalHeadImgUrl = relativePath
+	}
 	// log.Println(info)
 	return info, nil
 }
@@ -299,7 +358,7 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 			continue
 		}
 		if len(strContent) == 0 {
-			log.Printf("%s cotent nil\n", strUsrName)
+			// log.Printf("%s cotent nil\n", strUsrName)
 			continue
 		}
 
@@ -308,13 +367,36 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 		session.Content = strContent
 		session.Time = nTime
 		session.IsGroup = strings.HasSuffix(strUsrName, "@chatroom")
-		info, err := P.WechatGetUserInfoByName(strUsrName)
+		info, err := P.WechatGetUserInfoByNameOnCache(strUsrName)
 		if err != nil {
 			log.Printf("WechatGetUserInfoByName %s failed\n", strUsrName)
 			continue
 		}
 		session.UserInfo = *info
 		List.Rows = append(List.Rows, session)
+		List.Total += 1
+	}
+
+	return List, nil
+}
+
+func (P *WechatDataProvider) WeChatGetContactList(pageIndex int, pageSize int) (*WeChatUserList, error) {
+	List := &WeChatUserList{}
+	List.Users = make([]WeChatUserInfo, 0)
+
+	if P.ContactList.Total <= pageIndex*pageSize {
+		return List, nil
+	}
+	end := (pageIndex * pageSize) + pageSize
+	if end > P.ContactList.Total {
+		end = P.ContactList.Total
+	}
+
+	log.Printf("P.ContactList.Total %d, start %d, end %d", P.ContactList.Total, pageIndex*pageSize, end)
+	var info WeChatUserInfo
+	for _, contact := range P.ContactList.Users[pageIndex*pageSize : end] {
+		info = contact.WeChatUserInfo
+		List.Users = append(List.Users, info)
 		List.Total += 1
 	}
 
@@ -583,23 +665,23 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 			}
 		case 3:
 			if len(ext.Field2) > 0 && (msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc) {
-				msg.ThumbPath = P.resPath + ext.Field2[len(P.SelfInfo.UserName):]
+				msg.ThumbPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
 			}
 		case 4:
 			if len(ext.Field2) > 0 {
 				if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_File {
-					msg.FileInfo.FilePath = P.resPath + ext.Field2[len(P.SelfInfo.UserName):]
+					msg.FileInfo.FilePath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
 					msg.FileInfo.FileName = filepath.Base(ext.Field2)
 				} else if msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc {
-					msg.ImagePath = P.resPath + ext.Field2[len(P.SelfInfo.UserName):]
-					msg.VideoPath = P.resPath + ext.Field2[len(P.SelfInfo.UserName):]
+					msg.ImagePath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+					msg.VideoPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
 				}
 			}
 		}
 	}
 
 	if msg.Type == Wechat_Message_Type_Voice {
-		msg.VoicePath = fmt.Sprintf("%s\\FileStorage\\Voice\\%d.mp3", P.resPath, msg.MsgSvrId)
+		msg.VoicePath = fmt.Sprintf("%s\\FileStorage\\Voice\\%d.mp3", P.prefixResPath, msg.MsgSvrId)
 	}
 }
 
@@ -892,7 +974,50 @@ func (P *WechatDataProvider) WechatGetUserInfoByNameOnCache(name string) (*WeCha
 	return pinfo, nil
 }
 
-func WechatGetAccountInfo(resPath, accountName string) (*WeChatAccountInfo, error) {
+func (P *WechatDataProvider) wechatGetAllContact() (*WeChatContactList, error) {
+	List := &WeChatContactList{}
+	List.Users = make([]WeChatContact, 0)
+
+	querySql := fmt.Sprintf("select ifnull(UserName,'') as UserName,Reserved1,Reserved2,ifnull(PYInitial,'') as PYInitial,ifnull(QuanPin,'') as QuanPin,ifnull(RemarkPYInitial,'') as RemarkPYInitial,ifnull(RemarkQuanPin,'') as RemarkQuanPin from Contact desc;")
+	dbRows, err := P.microMsg.Query(querySql)
+	if err != nil {
+		log.Println(err)
+		return List, err
+	}
+	defer dbRows.Close()
+
+	var UserName string
+	var Reserved1, Reserved2 int
+	for dbRows.Next() {
+		var Contact WeChatContact
+		err = dbRows.Scan(&UserName, &Reserved1, &Reserved2, &Contact.PYInitial, &Contact.QuanPin, &Contact.RemarkPYInitial, &Contact.RemarkQuanPin)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+
+		if Reserved1 != 1 || Reserved2 != 1 {
+			// log.Printf("%s is not your contact", UserName)
+			continue
+		}
+		info, err := P.WechatGetUserInfoByNameOnCache(UserName)
+		if err != nil {
+			log.Printf("WechatGetUserInfoByName %s failed\n", UserName)
+			continue
+		}
+
+		if info.NickName == "" && info.ReMark == "" {
+			continue
+		}
+		Contact.WeChatUserInfo = *info
+		List.Users = append(List.Users, Contact)
+		List.Total += 1
+	}
+
+	return List, nil
+}
+
+func WechatGetAccountInfo(resPath, prefixRes, accountName string) (*WeChatAccountInfo, error) {
 	MicroMsgDBPath := resPath + "\\Msg\\" + MicroMsgDB
 	if _, err := os.Stat(MicroMsgDBPath); err != nil {
 		log.Println("MicroMsgDBPath:", MicroMsgDBPath, err)
@@ -934,6 +1059,11 @@ func WechatGetAccountInfo(resPath, accountName string) (*WeChatAccountInfo, erro
 	info.SmallHeadImgUrl = smallHeadImgUrl
 	info.BigHeadImgUrl = bigHeadImgUrl
 
+	localHeadImgPath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", resPath, accountName)
+	relativePath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", prefixRes, accountName)
+	if _, err = os.Stat(localHeadImgPath); err == nil {
+		info.LocalHeadImgUrl = relativePath
+	}
 	// log.Println(info)
 	return info, nil
 }

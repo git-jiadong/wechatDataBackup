@@ -2,51 +2,35 @@ package main
 
 import (
 	"embed"
-	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
-	"strings"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
 
-type FileLoader struct {
-	http.Handler
-}
-
-func NewFileLoader() *FileLoader {
-	return &FileLoader{}
-}
-
-func (h *FileLoader) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	var err error
-	requestedFilename := strings.TrimPrefix(req.URL.Path, "/")
-	// println("Requesting file:", requestedFilename)
-	fileData, err := os.ReadFile(requestedFilename)
-	if err != nil {
-		res.WriteHeader(http.StatusBadRequest)
-		res.Write([]byte(fmt.Sprintf("Could not load file %s", requestedFilename)))
-	}
-
-	res.Write(fileData)
-}
-
 func init() {
+	// log output format
 	log.SetFlags(log.Ldate | log.Lmicroseconds | log.Lshortfile)
 }
 
 func main() {
-	file, _ := os.OpenFile("app.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	defer file.Close()
+	logJack := &lumberjack.Logger{
+		Filename:   "./app.log",
+		MaxSize:    5,
+		MaxBackups: 1,
+		MaxAge:     30,
+		Compress:   false,
+	}
+	defer logJack.Close()
 
-	multiWriter := io.MultiWriter(file, os.Stdout)
+	multiWriter := io.MultiWriter(logJack, os.Stdout)
 	// 设置日志输出目标为文件
 	log.SetOutput(multiWriter)
 	log.Println("====================== wechatDataBackup ======================")
@@ -62,7 +46,7 @@ func main() {
 		Height:    768,
 		AssetServer: &assetserver.Options{
 			Assets:  assets,
-			Handler: NewFileLoader(),
+			Handler: app.FLoader,
 		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
 		OnStartup:        app.startup,

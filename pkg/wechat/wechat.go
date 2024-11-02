@@ -49,6 +49,11 @@ type wechatMediaMSG struct {
 	Buf      []byte
 }
 
+type wechatHeadImgMSG struct {
+	userName string
+	Buf      []byte
+}
+
 func GetWeChatAllInfo() *WeChatInfoList {
 	list := GetWeChatInfo()
 
@@ -73,6 +78,121 @@ func ExportWeChatAllData(info WeChatInfo, expPath string, progress chan<- string
 	exportWeChatBat(info, expPath, progress)
 	exportWeChatVideoAndFile(info, expPath, progress)
 	exportWeChatVoice(info, expPath, progress)
+	exportWeChatHeadImage(info, expPath, progress)
+}
+
+func exportWeChatHeadImage(info WeChatInfo, expPath string, progress chan<- string) {
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Head Image\", \"progress\": 81}"
+
+	headImgPath := fmt.Sprintf("%s\\FileStorage\\HeadImage", expPath)
+	if _, err := os.Stat(headImgPath); err != nil {
+		if err := os.MkdirAll(headImgPath, 0644); err != nil {
+			log.Printf("MkdirAll %s failed: %v\n", headImgPath, err)
+			progress <- fmt.Sprintf("{\"status\":\"error\", \"result\":\"%v error\"}", err)
+			return
+		}
+	}
+
+	handleNumber := int64(0)
+	fileNumber := int64(0)
+
+	var wg sync.WaitGroup
+	var reportWg sync.WaitGroup
+	quitChan := make(chan struct{})
+	MSGChan := make(chan wechatHeadImgMSG, 100)
+	go func() {
+		for {
+			miscDBPath := fmt.Sprintf("%s\\Msg\\Misc.db", expPath)
+			_, err := os.Stat(miscDBPath)
+			if err != nil {
+				log.Println("no exist:", miscDBPath)
+				break
+			}
+
+			db, err := sql.Open("sqlite3", miscDBPath)
+			if err != nil {
+				log.Printf("open %s failed: %v\n", miscDBPath, err)
+				break
+			}
+			defer db.Close()
+
+			err = db.QueryRow("select count(*) from ContactHeadImg1;").Scan(&fileNumber)
+			if err != nil {
+				log.Println("select count(*) failed", err)
+				break
+			}
+			log.Println("ContactHeadImg1 fileNumber", fileNumber)
+			rows, err := db.Query("select ifnull(usrName,'') as usrName, ifnull(smallHeadBuf,'') as smallHeadBuf from ContactHeadImg1;")
+			if err != nil {
+				log.Printf("Query failed: %v\n", err)
+				break
+			}
+
+			msg := wechatHeadImgMSG{}
+			for rows.Next() {
+				err := rows.Scan(&msg.userName, &msg.Buf)
+				if err != nil {
+					log.Println("Scan failed: ", err)
+					break
+				}
+
+				MSGChan <- msg
+			}
+			break
+		}
+		close(MSGChan)
+	}()
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for msg := range MSGChan {
+				imgPath := fmt.Sprintf("%s\\%s.headimg", headImgPath, msg.userName)
+				for {
+					// log.Println("imgPath:", imgPath, len(msg.Buf))
+					_, err := os.Stat(imgPath)
+					if err == nil {
+						break
+					}
+					if len(msg.userName) == 0 || len(msg.Buf) == 0 {
+						break
+					}
+					err = os.WriteFile(imgPath, msg.Buf[:], 0666)
+					if err != nil {
+						log.Println("WriteFile:", imgPath, err)
+					}
+					break
+				}
+				atomic.AddInt64(&handleNumber, 1)
+			}
+		}()
+	}
+
+	reportWg.Add(1)
+	go func() {
+		defer reportWg.Done()
+		for {
+			select {
+			case <-quitChan:
+				log.Println("WeChat Head Image report progress end")
+				return
+			default:
+				if fileNumber != 0 {
+					filePercent := float64(handleNumber) / float64(fileNumber)
+					totalPercent := 81 + (filePercent * (100 - 81))
+					totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat Head Image doing\", \"progress\": %d}", int(totalPercent))
+					progress <- totalPercentStr
+				}
+				time.Sleep(time.Second)
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(quitChan)
+	reportWg.Wait()
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat Head Image end\", \"progress\": 100}"
 }
 
 func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) {
@@ -171,7 +291,7 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 				return
 			default:
 				filePercent := float64(handleNumber) / float64(fileNumber)
-				totalPercent := 61 + (filePercent * (100 - 61))
+				totalPercent := 61 + (filePercent * (80 - 61))
 				totalPercentStr := fmt.Sprintf("{\"status\":\"processing\", \"result\":\"export WeChat voice doing\", \"progress\": %d}", int(totalPercent))
 				progress <- totalPercentStr
 				time.Sleep(time.Second)
@@ -182,7 +302,7 @@ func exportWeChatVoice(info WeChatInfo, expPath string, progress chan<- string) 
 	wg.Wait()
 	close(quitChan)
 	reportWg.Wait()
-	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat voice end\", \"progress\": 100}"
+	progress <- "{\"status\":\"processing\", \"result\":\"export WeChat voice end\", \"progress\": 80}"
 }
 
 func exportWeChatVideoAndFile(info WeChatInfo, expPath string, progress chan<- string) {
@@ -792,4 +912,32 @@ func getPathFileNumber(targetPath string, fileSuffix string) int64 {
 	}
 
 	return number
+}
+
+func ExportWeChatHeadImage(exportPath string) {
+	progress := make(chan string)
+	info := WeChatInfo{}
+
+	miscDBPath := fmt.Sprintf("%s\\Msg\\Misc.db", exportPath)
+	_, err := os.Stat(miscDBPath)
+	if err != nil {
+		log.Println("no exist:", miscDBPath)
+		return
+	}
+
+	headImgPath := fmt.Sprintf("%s\\FileStorage\\HeadImage", exportPath)
+	if _, err := os.Stat(headImgPath); err == nil {
+		log.Println("has HeadImage")
+		return
+	}
+
+	go func() {
+		exportWeChatHeadImage(info, exportPath, progress)
+		close(progress)
+	}()
+
+	for p := range progress {
+		log.Println(p)
+	}
+	log.Println("ExportWeChatHeadImage done")
 }

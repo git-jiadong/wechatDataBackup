@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"wechatDataBackup/pkg/utils"
 	"wechatDataBackup/pkg/wechat"
 
@@ -18,8 +20,36 @@ const (
 	defaultConfig        = "config"
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
-	appVersion           = "v1.0.3"
+	configExportPathKey  = "exportPath"
+	appVersion           = "v1.0.4"
 )
+
+type FileLoader struct {
+	http.Handler
+	FilePrefix string
+}
+
+func NewFileLoader(prefix string) *FileLoader {
+	return &FileLoader{FilePrefix: prefix}
+}
+
+func (h *FileLoader) SetFilePrefix(prefix string) {
+	h.FilePrefix = prefix
+	log.Println("SetFilePrefix", h.FilePrefix)
+}
+
+func (h *FileLoader) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	var err error
+	requestedFilename := h.FilePrefix + "\\" + strings.TrimPrefix(req.URL.Path, "/")
+	// log.Println("Requesting file:", requestedFilename)
+	fileData, err := os.ReadFile(requestedFilename)
+	if err != nil {
+		res.WriteHeader(http.StatusBadRequest)
+		res.Write([]byte(fmt.Sprintf("Could not load file %s", requestedFilename)))
+	}
+
+	res.Write(fileData)
+}
 
 // App struct
 type App struct {
@@ -29,6 +59,8 @@ type App struct {
 	defaultUser string
 	users       []string
 	firstStart  bool
+
+	FLoader *FileLoader
 }
 
 type WeChatInfo struct {
@@ -51,21 +83,38 @@ type WeChatAccountInfos struct {
 	Total          int                        `json:"Total"`
 }
 
+type ErrorMessage struct {
+	ErrorStr string `json:"error"`
+}
+
 // NewApp creates a new App application struct
 func NewApp() *App {
 	a := &App{}
 
+	a.FLoader = NewFileLoader(".\\")
 	viper.SetConfigName(defaultConfig)
 	viper.SetConfigType("json")
 	viper.AddConfigPath(".")
 	if err := viper.ReadInConfig(); err == nil {
 		a.defaultUser = viper.GetString(configDefaultUserKey)
 		a.users = viper.GetStringSlice(configUsersKey)
+		prefix := viper.GetString(configExportPathKey)
+		if prefix != "" {
+			log.Println("SetFilePrefix", prefix)
+			a.FLoader.SetFilePrefix(prefix)
+		}
+
+		a.scanAccountByPath(prefix)
 		// log.Println(a.defaultUser)
 		// log.Println(a.users)
 	} else {
+		if a.scanAccountByPath(".\\") != nil {
+			log.Println("not config exist")
+		}
+	}
+	log.Printf("default: %s users: %v\n", a.defaultUser, a.users)
+	if len(a.users) == 0 {
 		a.firstStart = true
-		log.Println("not config exist")
 	}
 
 	return a
@@ -92,6 +141,11 @@ func (a *App) GetWeChatAllInfo() string {
 	infoList := WeChatInfoList{}
 	infoList.Info = make([]WeChatInfo, 0)
 	infoList.Total = 0
+
+	if a.provider != nil {
+		a.provider.WechatWechatDataProviderClose()
+		a.provider = nil
+	}
 
 	a.infoList = wechat.GetWeChatAllInfo()
 	for i := range a.infoList.Info {
@@ -135,12 +189,13 @@ func (a *App) ExportWeChatAllData(full bool, acountName string) {
 			return
 		}
 
-		_, err := os.Stat(".\\User")
+		prefixExportPath := a.FLoader.FilePrefix + "\\User\\"
+		_, err := os.Stat(prefixExportPath)
 		if err != nil {
-			os.Mkdir(".\\User", os.ModeDir)
+			os.Mkdir(prefixExportPath, os.ModeDir)
 		}
 
-		expPath := ".\\User\\" + pInfo.AcountName
+		expPath := prefixExportPath + pInfo.AcountName
 		_, err = os.Stat(expPath)
 		if err == nil {
 			if !full {
@@ -177,7 +232,7 @@ func (a *App) ExportWeChatAllData(full bool, acountName string) {
 	}()
 }
 
-func (a *App) createWechatDataProvider(resPath string) error {
+func (a *App) createWechatDataProvider(resPath string, prefix string) error {
 	if a.provider != nil && a.provider.SelfInfo != nil && filepath.Base(resPath) == a.provider.SelfInfo.UserName {
 		log.Println("WechatDataProvider not need create:", a.provider.SelfInfo.UserName)
 		return nil
@@ -189,7 +244,7 @@ func (a *App) createWechatDataProvider(resPath string) error {
 		log.Println("createWechatDataProvider WechatWechatDataProviderClose")
 	}
 
-	provider, err := wechat.CreateWechatDataProvider(resPath)
+	provider, err := wechat.CreateWechatDataProvider(resPath, prefix)
 	if err != nil {
 		log.Println("CreateWechatDataProvider failed:", resPath)
 		return err
@@ -202,26 +257,49 @@ func (a *App) createWechatDataProvider(resPath string) error {
 }
 
 func (a *App) WeChatInit() {
-	expPath := ".\\User\\" + a.defaultUser
-	if a.createWechatDataProvider(expPath) == nil {
+	if len(a.defaultUser) == 0 {
+		log.Println("not defaultUser")
+		return
+	}
+
+	expPath := a.FLoader.FilePrefix + "\\User\\" + a.defaultUser
+	prefixPath := "\\User\\" + a.defaultUser
+	wechat.ExportWeChatHeadImage(expPath)
+	if a.createWechatDataProvider(expPath, prefixPath) == nil {
 		infoJson, _ := json.Marshal(a.provider.SelfInfo)
 		runtime.EventsEmit(a.ctx, "selfInfo", string(infoJson))
 	}
 }
 
 func (a *App) GetWechatSessionList(pageIndex int, pageSize int) string {
-	expPath := ".\\User\\" + a.defaultUser
-	if a.createWechatDataProvider(expPath) != nil {
-		return ""
+	if a.provider == nil {
+		log.Println("provider not init")
+		return "{\"Total\":0}"
 	}
 	log.Printf("pageIndex: %d\n", pageIndex)
 	list, err := a.provider.WeChatGetSessionList(pageIndex, pageSize)
 	if err != nil {
-		return ""
+		return "{\"Total\":0}"
 	}
 
 	listStr, _ := json.Marshal(list)
 	log.Println("GetWechatSessionList:", list.Total)
+	return string(listStr)
+}
+
+func (a *App) GetWechatContactList(pageIndex int, pageSize int) string {
+	if a.provider == nil {
+		log.Println("provider not init")
+		return "{\"Total\":0}"
+	}
+	log.Printf("pageIndex: %d\n", pageIndex)
+	list, err := a.provider.WeChatGetContactList(pageIndex, pageSize)
+	if err != nil {
+		return "{\"Total\":0}"
+	}
+
+	listStr, _ := json.Marshal(list)
+	log.Println("WeChatGetContactList:", list.Total)
 	return string(listStr)
 }
 
@@ -284,6 +362,7 @@ func (a *App) GetWechatMessageDate(userName string) string {
 func (a *App) setCurrentConfig() {
 	viper.Set(configDefaultUserKey, a.defaultUser)
 	viper.Set(configUsersKey, a.users)
+	viper.Set(configExportPathKey, a.FLoader.FilePrefix)
 	err := viper.SafeWriteConfig()
 	if err != nil {
 		log.Println(err)
@@ -314,7 +393,9 @@ func (a *App) OpenFileOrExplorer(filePath string, explorer bool) string {
 	// 	filePath = root + filePath[1:]
 	// }
 	// log.Println("OpenFileOrExplorer:", filePath)
-	err := utils.OpenFileOrExplorer(filePath, explorer)
+
+	path := a.FLoader.FilePrefix + filePath
+	err := utils.OpenFileOrExplorer(path, explorer)
 	if err != nil {
 		return "{\"result\": \"OpenFileOrExplorer failed\", \"status\":\"failed\"}"
 	}
@@ -349,13 +430,14 @@ func (a *App) GetWechatLocalAccountInfo() string {
 	infos.Total = 0
 	infos.CurrentAccount = a.defaultUser
 	for i := range a.users {
-		resPath := ".\\User\\" + a.users[i]
+		resPath := a.FLoader.FilePrefix + "\\User\\" + a.users[i]
 		if _, err := os.Stat(resPath); err != nil {
 			log.Println("GetWechatLocalAccountInfo:", resPath, err)
 			continue
 		}
 
-		info, err := wechat.WechatGetAccountInfo(resPath, a.users[i])
+		prefixResPath := "\\User\\" + a.users[i]
+		info, err := wechat.WechatGetAccountInfo(resPath, prefixResPath, a.users[i])
 		if err != nil {
 			log.Println("GetWechatLocalAccountInfo", err)
 			continue
@@ -385,4 +467,128 @@ func (a *App) WechatSwitchAccount(account string) bool {
 	}
 
 	return false
+}
+
+func (a *App) GetExportPathStat() string {
+	path := a.FLoader.FilePrefix
+	log.Println("utils.GetPathStat ++")
+	stat, err := utils.GetPathStat(path)
+	log.Println("utils.GetPathStat --")
+	if err != nil {
+		log.Println("GetPathStat error:", path, err)
+		var msg ErrorMessage
+		msg.ErrorStr = fmt.Sprintf("%s:%v", path, err)
+		msgStr, _ := json.Marshal(msg)
+		return string(msgStr)
+	}
+
+	statString, _ := json.Marshal(stat)
+
+	return string(statString)
+}
+
+func (a *App) ExportPathIsCanWrite() bool {
+	path := a.FLoader.FilePrefix
+	return utils.PathIsCanWriteFile(path)
+}
+
+func (a *App) OpenExportPath() {
+	path := a.FLoader.FilePrefix
+	runtime.BrowserOpenURL(a.ctx, path)
+}
+
+func (a *App) OpenDirectoryDialog() string {
+	dialogOptions := runtime.OpenDialogOptions{
+		Title: "选择导出路径",
+	}
+	selectedDir, err := runtime.OpenDirectoryDialog(a.ctx, dialogOptions)
+	if err != nil {
+		log.Println("OpenDirectoryDialog:", err)
+		return ""
+	}
+
+	if selectedDir == "" {
+		log.Println("Cancel selectedDir")
+		return ""
+	}
+
+	if selectedDir == a.FLoader.FilePrefix {
+		log.Println("same path No need SetFilePrefix")
+		return ""
+	}
+
+	if !utils.PathIsCanWriteFile(selectedDir) {
+		log.Println("PathIsCanWriteFile:", selectedDir, "error")
+		return ""
+	}
+
+	a.FLoader.SetFilePrefix(selectedDir)
+	log.Println("OpenDirectoryDialog:", selectedDir)
+	a.scanAccountByPath(selectedDir)
+	return selectedDir
+}
+
+func (a *App) scanAccountByPath(path string) error {
+	infos := WeChatAccountInfos{}
+	infos.Info = make([]wechat.WeChatAccountInfo, 0)
+	infos.Total = 0
+	infos.CurrentAccount = ""
+
+	userPath := path + "\\User\\"
+	if _, err := os.Stat(userPath); err != nil {
+		return err
+	}
+
+	dirs, err := os.ReadDir(userPath)
+	if err != nil {
+		log.Println("ReadDir", err)
+		return err
+	}
+
+	for i := range dirs {
+		if !dirs[i].Type().IsDir() {
+			continue
+		}
+		log.Println("dirs[i].Name():", dirs[i].Name())
+		resPath := path + "\\User\\" + dirs[i].Name()
+		prefixResPath := "\\User\\" + dirs[i].Name()
+		info, err := wechat.WechatGetAccountInfo(resPath, prefixResPath, dirs[i].Name())
+		if err != nil {
+			log.Println("GetWechatLocalAccountInfo", err)
+			continue
+		}
+
+		infos.Info = append(infos.Info, *info)
+		infos.Total += 1
+	}
+
+	users := make([]string, 0)
+	for i := 0; i < infos.Total; i++ {
+		users = append(users, infos.Info[i].AccountName)
+	}
+
+	a.users = users
+	found := false
+	for i := range a.users {
+		if a.defaultUser == a.users[i] {
+			found = true
+		}
+	}
+
+	if !found {
+		a.defaultUser = ""
+	}
+	if a.defaultUser == "" && len(a.users) > 0 {
+		a.defaultUser = a.users[0]
+	}
+
+	if len(a.users) > 0 {
+		a.setCurrentConfig()
+	}
+
+	return nil
+}
+
+func (a *App) OepnLogFileExplorer() {
+	utils.OpenFileOrExplorer(".\\app.log", true)
 }
