@@ -14,7 +14,10 @@ PC微信聊天记录数据导出工具
 [演示视频](https://www.bilibili.com/video/BV1bPH1eWEEy/?share_source=copy_web&vd_source=b5cfa9258a9ad9900a00e9c1ce3cb4b6)
 ## 使用方法
 1. 下载release可执行文件直接打开
-2. 下载源码自行编译可执行文件 [安装wails环境](https://wails.io/zh-Hans/docs/gettingstarted/installation)
+2. 下载源码自行编译可执行文件 
+    - 编译环境
+        - wails [安装wails环境](https://wails.io/zh-Hans/docs/gettingstarted/installation)
+        - gcc
 ```shell
 git clone https://github.com/git-jiadong/wechatDataBackup.git
 cd wechatDataBackup
