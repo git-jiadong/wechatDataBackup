@@ -21,7 +21,7 @@ const (
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
 	configExportPathKey  = "exportPath"
-	appVersion           = "v1.0.4"
+	appVersion           = "v1.0.5"
 )
 
 type FileLoader struct {
@@ -59,8 +59,8 @@ type App struct {
 	defaultUser string
 	users       []string
 	firstStart  bool
-
-	FLoader *FileLoader
+	firstInit   bool
+	FLoader     *FileLoader
 }
 
 type WeChatInfo struct {
@@ -91,6 +91,7 @@ type ErrorMessage struct {
 func NewApp() *App {
 	a := &App{}
 
+	a.firstInit = true
 	a.FLoader = NewFileLoader(".\\")
 	viper.SetConfigName(defaultConfig)
 	viper.SetConfigType("json")
@@ -103,14 +104,8 @@ func NewApp() *App {
 			log.Println("SetFilePrefix", prefix)
 			a.FLoader.SetFilePrefix(prefix)
 		}
-
-		a.scanAccountByPath(prefix)
-		// log.Println(a.defaultUser)
-		// log.Println(a.users)
 	} else {
-		if a.scanAccountByPath(".\\") != nil {
-			log.Println("not config exist")
-		}
+		log.Println("not config exist")
 	}
 	log.Printf("default: %s users: %v\n", a.defaultUser, a.users)
 	if len(a.users) == 0 {
@@ -257,6 +252,13 @@ func (a *App) createWechatDataProvider(resPath string, prefix string) error {
 }
 
 func (a *App) WeChatInit() {
+
+	if a.firstInit {
+		a.firstInit = false
+		a.scanAccountByPath(a.FLoader.FilePrefix)
+		log.Println("scanAccountByPath:", a.FLoader.FilePrefix)
+	}
+
 	if len(a.defaultUser) == 0 {
 		log.Println("not defaultUser")
 		return
