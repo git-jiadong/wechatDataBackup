@@ -15,18 +15,23 @@ PC微信聊天记录数据导出工具
 ## 使用方法
 1. 下载release可执行文件直接打开
 2. 下载源码自行编译可执行文件 [安装wails环境](https://wails.io/zh-Hans/docs/gettingstarted/installation)
+
 ```shell
 git clone https://github.com/git-jiadong/wechatDataBackup.git
 cd wechatDataBackup
 wails build
 ```
+
 编译成功后在可执行二进制文件路径`build\bin\wechatDataBackup.exe`
+
+如果编译错误可能是没有gcc环境导致的，可以安装 [tdm-gcc](https://jmeubank.github.io/tdm-gcc/) 后在尝试。
 
 3. 导出聊天记录
 电脑登陆微信，然后打开`wechatDataBackup.exe`后按照如图提示导出
 ![](./res/tips.png)
 
 ## 功能
+
 本项目目前的规划与实现进度：
 - [x] 支持图片消息
 - [x] 支持视频消息
@@ -38,9 +43,12 @@ wails build
 - [x] 支持日期检索
 - [x] 支持按群成员检索
 - [x] 支持增量式导出
+- [x] 多开账号选择导出
+- [x] 多开账号数据切换
+- [x] 头像使用本地头像
 - [ ] 支持更多消息类型显示
 - [ ] 图片查看器重绘
-- [ ] 实现头像或表情预先下载（实现完全离线查看）
+- [ ] 实现表情预先下载（实现完全离线查看）
 - [ ] 聊天报告
 - [ ] AI本地模型应用
 - [ ] 导出数据本地加密
