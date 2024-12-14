@@ -1,7 +1,9 @@
 package utils
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -119,4 +121,32 @@ func PathIsCanWriteFile(path string) bool {
 	os.Remove(filepath)
 
 	return true
+}
+
+func CopyFile(src, dst string) (int64, error) {
+	stat, err := os.Stat(src)
+	if err != nil {
+		return 0, err
+	}
+	if stat.IsDir() {
+		return 0, errors.New(src + " is dir")
+	}
+	sourceFile, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer sourceFile.Close()
+
+	destFile, err := os.Create(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer destFile.Close()
+
+	bytesWritten, err := io.Copy(destFile, sourceFile)
+	if err != nil {
+		return bytesWritten, err
+	}
+
+	return bytesWritten, nil
 }

@@ -9,6 +9,7 @@ PC微信聊天记录数据导出工具
 效果图如下：
 
 ![](./res/result.png)
+![](./res/result2.png)
 
 ## 演示视频
 [演示视频](https://www.bilibili.com/video/BV1bPH1eWEEy/?share_source=copy_web&vd_source=b5cfa9258a9ad9900a00e9c1ce3cb4b6)
@@ -47,7 +48,7 @@ wails build
 - [x] 多开账号数据切换
 - [x] 头像使用本地头像
 - [ ] 支持更多消息类型显示
-- [ ] 图片查看器重绘
+- [x] 图片查看器重绘
 - [ ] 实现表情预先下载（实现完全离线查看）
 - [ ] 聊天报告
 - [ ] AI本地模型应用
@@ -63,6 +64,10 @@ A: 手机端可以使用聊天数据迁移功能，将手机的数据迁移到�
 A: 这是由于可能数据存在于内存中还没有回写到磁盘导致的，退出微信时会将内存的数据全部回写到磁盘，导出数据时最好退出重新登陆一次微信，保证数据都在磁盘中再导出即可。<br>
 **Q: 有些图片、视频打不开**<br>
 A: 这是电脑端微信没有点开过这个消息，默认只加载了预览图而已，如果手机有打开过可以把手机的记录迁移到电脑，迁移后重新退出登陆一次微信导出即可。<br>
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=git-jiadong/wechatDataBackup&type=Date)](https://star-history.com/?utm_source=bestxtools.com#git-jiadong/wechatDataBackup&Date)
 
 ## 免责声明
 **⚠️ 本项目仅供学习、研究使用，严禁商业使用**<br/>

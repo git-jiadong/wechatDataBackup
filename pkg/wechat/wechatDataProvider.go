@@ -180,17 +180,18 @@ type WechatDataProvider struct {
 	resPath       string
 	prefixResPath string
 	microMsg      *sql.DB
-
-	msgDBs      []*wechatMsgDB
-	userInfoMap map[string]WeChatUserInfo
-	userInfoMtx sync.Mutex
+	openIMContact *sql.DB
+	msgDBs        []*wechatMsgDB
+	userInfoMap   map[string]WeChatUserInfo
+	userInfoMtx   sync.Mutex
 
 	SelfInfo    *WeChatUserInfo
 	ContactList *WeChatContactList
 }
 
 const (
-	MicroMsgDB = "MicroMsg.db"
+	MicroMsgDB      = "MicroMsg.db"
+	OpenIMContactDB = "OpenIMContact.db"
 )
 
 type byTime []*wechatMsgDB
@@ -239,6 +240,15 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 		return provider, err
 	}
 
+	var openIMContact *sql.DB
+	OpenIMContactDBPath := resPath + "\\Msg\\" + OpenIMContactDB
+	if _, err := os.Stat(OpenIMContactDBPath); err == nil {
+		openIMContact, err = sql.Open("sqlite3", OpenIMContactDBPath)
+		if err != nil {
+			log.Printf("open db %s error: %v", OpenIMContactDBPath, err)
+		}
+	}
+
 	index := 0
 	for {
 		msgDBPath := fmt.Sprintf("%s\\Msg\\Multi\\MSG%d.db", provider.resPath, index)
@@ -262,6 +272,7 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 	}
 	provider.userInfoMap = make(map[string]WeChatUserInfo)
 	provider.microMsg = microMsg
+	provider.openIMContact = openIMContact
 	provider.SelfInfo, err = provider.WechatGetUserInfoByNameOnCache(userName)
 	if err != nil {
 		log.Printf("WechatGetUserInfoByName %s failed: %v", userName, err)
@@ -283,6 +294,13 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 func (P *WechatDataProvider) WechatWechatDataProviderClose() {
 	if P.microMsg != nil {
 		err := P.microMsg.Close()
+		if err != nil {
+			log.Println("db close:", err)
+		}
+	}
+
+	if P.openIMContact != nil {
+		err := P.openIMContact.Close()
 		if err != nil {
 			log.Println("db close:", err)
 		}
@@ -336,6 +354,47 @@ func (P *WechatDataProvider) WechatGetUserInfoByName(name string) (*WeChatUserIn
 	return info, nil
 }
 
+func (P *WechatDataProvider) WechatGetOpenIMMUserInfoByName(name string) (*WeChatUserInfo, error) {
+	info := &WeChatUserInfo{}
+
+	var UserName, ReMark, NickName string
+	querySql := fmt.Sprintf("select ifnull(UserName,'') as UserName, ifnull(ReMark,'') as ReMark, ifnull(NickName,'') as NickName from OpenIMContact where UserName='%s';", name)
+	// log.Println(querySql)
+	if P.openIMContact != nil {
+		err := P.openIMContact.QueryRow(querySql).Scan(&UserName, &ReMark, &NickName)
+		if err != nil {
+			log.Println("not found User:", err)
+			return info, err
+		}
+	}
+
+	log.Printf("UserName %s, ReMark %s, NickName %s\n", UserName, ReMark, NickName)
+
+	var smallHeadImgUrl, bigHeadImgUrl string
+	querySql = fmt.Sprintf("select ifnull(smallHeadImgUrl,'') as smallHeadImgUrl, ifnull(bigHeadImgUrl,'') as bigHeadImgUrl from ContactHeadImgUrl where usrName='%s';", UserName)
+	// log.Println(querySql)
+	err := P.microMsg.QueryRow(querySql).Scan(&smallHeadImgUrl, &bigHeadImgUrl)
+	if err != nil {
+		log.Println("not find headimg", err)
+	}
+
+	info.UserName = UserName
+	info.Alias = ""
+	info.ReMark = ReMark
+	info.NickName = NickName
+	info.SmallHeadImgUrl = smallHeadImgUrl
+	info.BigHeadImgUrl = bigHeadImgUrl
+	info.IsGroup = strings.HasSuffix(UserName, "@chatroom")
+
+	localHeadImgPath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", P.resPath, name)
+	relativePath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", P.prefixResPath, name)
+	if _, err = os.Stat(localHeadImgPath); err == nil {
+		info.LocalHeadImgUrl = relativePath
+	}
+	// log.Println(info)
+	return info, nil
+}
+
 func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (*WeChatSessionList, error) {
 	List := &WeChatSessionList{}
 	List.Rows = make([]WeChatSession, 0)
@@ -364,7 +423,7 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 
 		session.UserName = strUsrName
 		session.NickName = strNickName
-		session.Content = strContent
+		session.Content = revokemsg_parse(strContent)
 		session.Time = nTime
 		session.IsGroup = strings.HasSuffix(strUsrName, "@chatroom")
 		info, err := P.WechatGetUserInfoByNameOnCache(strUsrName)
@@ -502,7 +561,7 @@ func (P *WechatDataProvider) weChatGetMessageListByTime(userName string, time in
 		message.IsSender = IsSender
 		message.CreateTime = CreateTime
 		message.Talker = StrTalker
-		message.Content = StrContent
+		message.Content = revokemsg_parse(StrContent)
 		message.IsChatRoom = strings.HasSuffix(StrTalker, "@chatroom")
 		message.compressContent = make([]byte, len(CompressContent))
 		message.bytesExtra = make([]byte, len(BytesExtra))
@@ -559,6 +618,87 @@ func (P *WechatDataProvider) WeChatGetMessageListByKeyWord(userName string, time
 		}
 
 		_time = rawList.Rows[rawList.Total-1].CreateTime - 1
+	}
+
+	return List, nil
+}
+
+func (P *WechatDataProvider) WeChatGetMessageListByType(userName string, time int64, pageSize int, msgType string, direction Message_Search_Direction) (*WeChatMessageList, error) {
+
+	List := &WeChatMessageList{}
+	List.Rows = make([]WeChatMessage, 0)
+	selectTime := time
+	selectpageSize := 30
+	needSize := pageSize
+
+	if msgType != "" {
+		selectpageSize = 600
+	}
+	if direction == Message_Search_Both {
+		needSize = pageSize / 2
+	}
+	for direction == Message_Search_Forward || direction == Message_Search_Both {
+		selectList, err := P.weChatGetMessageListByTime(userName, selectTime, selectpageSize, Message_Search_Forward)
+		if err != nil {
+			return List, err
+		}
+
+		if selectList.Total == 0 {
+			break
+		}
+
+		for i, _ := range selectList.Rows {
+			if weChatMessageTypeFilter(&selectList.Rows[i], msgType) {
+				List.Rows = append(List.Rows, selectList.Rows[i])
+				List.Total += 1
+				needSize -= 1
+				if needSize <= 0 {
+					break
+				}
+			}
+		}
+		if needSize <= 0 {
+			break
+		}
+		selectTime = selectList.Rows[selectList.Total-1].CreateTime - 1
+		log.Printf("Forward selectTime %d, selectpageSize %d needSize %d\n", selectTime, selectpageSize, needSize)
+	}
+
+	selectTime = time
+	if direction == Message_Search_Both {
+		needSize = pageSize / 2
+	}
+	for direction == Message_Search_Backward || direction == Message_Search_Both {
+		selectList, err := P.weChatGetMessageListByTime(userName, selectTime, selectpageSize, Message_Search_Backward)
+		if err != nil {
+			return List, err
+		}
+
+		if selectList.Total == 0 {
+			break
+		}
+
+		tmpTotal := 0
+		tmpRows := make([]WeChatMessage, 0)
+		for i := selectList.Total - 1; i >= 0; i-- {
+			if weChatMessageTypeFilter(&selectList.Rows[i], msgType) {
+				tmpRows = append([]WeChatMessage{selectList.Rows[i]}, tmpRows...)
+				tmpTotal += 1
+				needSize -= 1
+				if needSize <= 0 {
+					break
+				}
+			}
+		}
+		if tmpTotal > 0 {
+			List.Rows = append(tmpRows, List.Rows...)
+			List.Total += tmpTotal
+		}
+		selectTime = selectList.Rows[0].CreateTime + 1
+		if needSize <= 0 {
+			break
+		}
+		log.Printf("Backward selectTime %d, selectpageSize %d needSize %d\n", selectTime, selectpageSize, needSize)
 	}
 
 	return List, nil
@@ -661,7 +801,7 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 		switch ext.Field1 {
 		case 1:
 			if msg.IsChatRoom {
-				msg.Talker = ext.Field2
+				msg.UserInfo.UserName = ext.Field2
 			}
 		case 3:
 			if len(ext.Field2) > 0 && (msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc) {
@@ -784,6 +924,8 @@ func (P *WechatDataProvider) wechatMessageGetUserInfo(msg *WeChatMessage) {
 	who := msg.Talker
 	if msg.IsSender == 1 {
 		who = P.SelfInfo.UserName
+	} else if msg.IsChatRoom {
+		who = msg.UserInfo.UserName
 	}
 
 	pinfo, err := P.WechatGetUserInfoByNameOnCache(who)
@@ -963,7 +1105,13 @@ func (P *WechatDataProvider) WechatGetUserInfoByNameOnCache(name string) (*WeCha
 		return &info, nil
 	}
 
-	pinfo, err := P.WechatGetUserInfoByName(name)
+	var pinfo *WeChatUserInfo
+	var err error
+	if strings.HasSuffix(name, "@openim") {
+		pinfo, err = P.WechatGetOpenIMMUserInfoByName(name)
+	} else {
+		pinfo, err = P.WechatGetUserInfoByName(name)
+	}
 	if err != nil {
 		log.Printf("WechatGetUserInfoByName %s failed: %v\n", name, err)
 		return nil, err
@@ -1066,4 +1214,13 @@ func WechatGetAccountInfo(resPath, prefixRes, accountName string) (*WeChatAccoun
 	}
 	// log.Println(info)
 	return info, nil
+}
+
+func revokemsg_parse(content string) string {
+	if strings.HasPrefix(content, "<revokemsg>") && strings.HasSuffix(content, "</revokemsg>") {
+		trimmed := strings.TrimSuffix(strings.TrimPrefix(content, "<revokemsg>"), "</revokemsg>")
+		return trimmed
+	}
+
+	return content
 }

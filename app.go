@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"wechatDataBackup/pkg/utils"
 	"wechatDataBackup/pkg/wechat"
@@ -21,7 +23,7 @@ const (
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
 	configExportPathKey  = "exportPath"
-	appVersion           = "v1.0.5"
+	appVersion           = "v1.0.6"
 )
 
 type FileLoader struct {
@@ -30,6 +32,7 @@ type FileLoader struct {
 }
 
 func NewFileLoader(prefix string) *FileLoader {
+	mime.AddExtensionType(".mp3", "audio/mpeg")
 	return &FileLoader{FilePrefix: prefix}
 }
 
@@ -39,16 +42,74 @@ func (h *FileLoader) SetFilePrefix(prefix string) {
 }
 
 func (h *FileLoader) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	var err error
 	requestedFilename := h.FilePrefix + "\\" + strings.TrimPrefix(req.URL.Path, "/")
-	// log.Println("Requesting file:", requestedFilename)
-	fileData, err := os.ReadFile(requestedFilename)
+
+	file, err := os.Open(requestedFilename)
 	if err != nil {
-		res.WriteHeader(http.StatusBadRequest)
-		res.Write([]byte(fmt.Sprintf("Could not load file %s", requestedFilename)))
+		http.Error(res, fmt.Sprintf("Could not load file %s", requestedFilename), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		http.Error(res, "Could not retrieve file info", http.StatusInternalServerError)
+		return
 	}
 
-	res.Write(fileData)
+	fileSize := fileInfo.Size()
+	rangeHeader := req.Header.Get("Range")
+	if rangeHeader == "" {
+		// 无 Range 请求，直接返回整个文件
+		res.Header().Set("Content-Length", strconv.FormatInt(fileSize, 10))
+		http.ServeContent(res, req, requestedFilename, fileInfo.ModTime(), file)
+		return
+	}
+
+	var start, end int64
+	if strings.HasPrefix(rangeHeader, "bytes=") {
+		ranges := strings.Split(strings.TrimPrefix(rangeHeader, "bytes="), "-")
+		start, _ = strconv.ParseInt(ranges[0], 10, 64)
+
+		if len(ranges) > 1 && ranges[1] != "" {
+			end, _ = strconv.ParseInt(ranges[1], 10, 64)
+		} else {
+			end = fileSize - 1
+		}
+	} else {
+		http.Error(res, "Invalid Range header", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	if start < 0 || end >= fileSize || start > end {
+		http.Error(res, "Requested range not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	contentType := mime.TypeByExtension(filepath.Ext(requestedFilename))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	res.Header().Set("Content-Type", contentType)
+	res.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, fileSize))
+	res.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	res.WriteHeader(http.StatusPartialContent)
+	buffer := make([]byte, 102400)
+	file.Seek(start, 0)
+	for current := start; current <= end; {
+		readSize := int64(len(buffer))
+		if end-current+1 < readSize {
+			readSize = end - current + 1
+		}
+
+		n, err := file.Read(buffer[:readSize])
+		if err != nil {
+			break
+		}
+
+		res.Write(buffer[:n])
+		current += int64(n)
+	}
 }
 
 // App struct
@@ -90,7 +151,7 @@ type ErrorMessage struct {
 // NewApp creates a new App application struct
 func NewApp() *App {
 	a := &App{}
-
+	log.Println("App version:", appVersion)
 	a.firstInit = true
 	a.FLoader = NewFileLoader(".\\")
 	viper.SetConfigName(defaultConfig)
@@ -306,7 +367,7 @@ func (a *App) GetWechatContactList(pageIndex int, pageSize int) string {
 }
 
 func (a *App) GetWechatMessageListByTime(userName string, time int64, pageSize int, direction string) string {
-	log.Println("GetWechatMessageList:", userName, pageSize, time, direction)
+	log.Println("GetWechatMessageListByTime:", userName, pageSize, time, direction)
 	if len(userName) == 0 {
 		return "{\"Total\":0, \"Rows\":[]}"
 	}
@@ -318,11 +379,33 @@ func (a *App) GetWechatMessageListByTime(userName string, time int64, pageSize i
 	}
 	list, err := a.provider.WeChatGetMessageListByTime(userName, time, pageSize, dire)
 	if err != nil {
-		log.Println("WeChatGetMessageList failed:", err)
+		log.Println("GetWechatMessageListByTime failed:", err)
 		return ""
 	}
 	listStr, _ := json.Marshal(list)
-	log.Println("GetWechatMessageList:", list.Total)
+	log.Println("GetWechatMessageListByTime:", list.Total)
+
+	return string(listStr)
+}
+
+func (a *App) GetWechatMessageListByType(userName string, time int64, pageSize int, msgType string, direction string) string {
+	log.Println("GetWechatMessageListByType:", userName, pageSize, time, msgType, direction)
+	if len(userName) == 0 {
+		return "{\"Total\":0, \"Rows\":[]}"
+	}
+	dire := wechat.Message_Search_Forward
+	if direction == "backward" {
+		dire = wechat.Message_Search_Backward
+	} else if direction == "both" {
+		dire = wechat.Message_Search_Both
+	}
+	list, err := a.provider.WeChatGetMessageListByType(userName, time, pageSize, msgType, dire)
+	if err != nil {
+		log.Println("WeChatGetMessageListByType failed:", err)
+		return ""
+	}
+	listStr, _ := json.Marshal(list)
+	log.Println("WeChatGetMessageListByType:", list.Total)
 
 	return string(listStr)
 }
@@ -593,4 +676,40 @@ func (a *App) scanAccountByPath(path string) error {
 
 func (a *App) OepnLogFileExplorer() {
 	utils.OpenFileOrExplorer(".\\app.log", true)
+}
+
+func (a *App) SaveFileDialog(file string, alisa string) string {
+	filePath := a.FLoader.FilePrefix + file
+	if _, err := os.Stat(filePath); err != nil {
+		log.Println("SaveFileDialog:", err)
+		return err.Error()
+	}
+
+	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		DefaultFilename: alisa,
+		Title:           "选择保存路径",
+	})
+	if err != nil {
+		log.Println("SaveFileDialog:", err)
+		return err.Error()
+	}
+
+	if savePath == "" {
+		return ""
+	}
+
+	dirPath := filepath.Dir(savePath)
+	if !utils.PathIsCanWriteFile(dirPath) {
+		errStr := "Path Is Can't Write File: " + filepath.Dir(savePath)
+		log.Println(errStr)
+		return errStr
+	}
+
+	_, err = utils.CopyFile(filePath, savePath)
+	if err != nil {
+		log.Println("Error CopyFile", filePath, savePath, err)
+		return err.Error()
+	}
+
+	return ""
 }
