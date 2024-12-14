@@ -64,7 +64,8 @@ A: 手机端可以使用聊天数据迁移功能，将手机的数据迁移到�
 A: 这是由于可能数据存在于内存中还没有回写到磁盘导致的，退出微信时会将内存的数据全部回写到磁盘，导出数据时最好退出重新登陆一次微信，保证数据都在磁盘中再导出即可。<br>
 **Q: 有些图片、视频打不开**<br>
 A: 这是电脑端微信没有点开过这个消息，默认只加载了预览图而已，如果手机有打开过可以把手机的记录迁移到电脑，迁移后重新退出登陆一次微信导出即可。<br>
-
+**Q: Win7电脑不能使用**<br>
+A: Win7电脑需要安装WebView2运行时才能正常使用。github release版本做了Windows版本限制，[Win7用户请安装专属的版本](https://pan.quark.cn/s/fa157b13e762)
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=git-jiadong/wechatDataBackup&type=Date)](https://star-history.com/?utm_source=bestxtools.com#git-jiadong/wechatDataBackup&Date)
