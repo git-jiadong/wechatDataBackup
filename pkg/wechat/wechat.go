@@ -19,9 +19,9 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
-	"wechatDataBackup/pkg/lame"
-	"wechatDataBackup/pkg/silk"
 
+	"github.com/git-jiadong/go-lame"
+	"github.com/git-jiadong/go-silk"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/sys/windows"
@@ -881,9 +881,9 @@ func silkToMp3(amrBuf []byte, mp3Path string) error {
 
 	wr := lame.NewWriter(of)
 	wr.Encoder.SetInSamplerate(24000)
+	wr.Encoder.SetOutSamplerate(24000)
 	wr.Encoder.SetNumChannels(1)
-	wr.Encoder.SetBitrate(16)
-	wr.Encoder.SetQuality(7)
+	wr.Encoder.SetQuality(5)
 	// IMPORTANT!
 	wr.Encoder.InitParams()
 

@@ -1,11 +1,11 @@
 module wechatDataBackup
 
-go 1.21
-
-toolchain go1.21.0
+go 1.21.0
 
 require (
 	github.com/beevik/etree v1.3.0
+	github.com/git-jiadong/go-lame v0.0.0-20241215065806-397455857191
+	github.com/git-jiadong/go-silk v0.0.0-20241215085148-b8734e30c24b
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/pierrec/lz4 v2.6.1+incompatible
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
