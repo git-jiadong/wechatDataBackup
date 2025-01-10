@@ -260,7 +260,8 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 		msgDB, err := wechatOpenMsgDB(msgDBPath)
 		if err != nil {
 			log.Printf("open db %s error: %v", msgDBPath, err)
-			break
+			index += 1
+			continue
 		}
 		provider.msgDBs = append(provider.msgDBs, msgDB)
 		log.Printf("MSG%d.db start %d - %d end\n", index, msgDB.startTime, msgDB.endTime)
@@ -1080,6 +1081,7 @@ func wechatOpenMsgDB(path string) (*wechatMsgDB, error) {
 	err = msgDB.db.QueryRow(querySql).Scan(&msgDB.startTime)
 	if err != nil {
 		log.Println("select DB startTime failed:", path, ":", err)
+		msgDB.db.Close()
 		return nil, err
 	}
 
@@ -1087,6 +1089,7 @@ func wechatOpenMsgDB(path string) (*wechatMsgDB, error) {
 	err = msgDB.db.QueryRow(querySql).Scan(&msgDB.endTime)
 	if err != nil {
 		log.Println("select DB endTime failed:", path, ":", err)
+		msgDB.db.Close()
 		return nil, err
 	}
 
