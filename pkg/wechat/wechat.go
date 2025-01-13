@@ -697,6 +697,12 @@ func Is64BitProcess(pid uint32) (bool, error) {
 }
 
 func GetWeChatKey(info *WeChatInfo) string {
+	mediaDB := info.FilePath + "\\Msg\\Media.db"
+	if _, err := os.Stat(mediaDB); err != nil {
+		log.Printf("open db %s error: %v", mediaDB, err)
+		return ""
+	}
+
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, uint32(info.ProcessID))
 	if err != nil {
 		log.Println("Error opening process:", err)

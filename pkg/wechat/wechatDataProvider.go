@@ -13,6 +13,7 @@ import (
 	"strings"
 	sync "sync"
 	"time"
+	"wechatDataBackup/pkg/utils"
 
 	"github.com/beevik/etree"
 	_ "github.com/mattn/go-sqlite3"
@@ -21,27 +22,36 @@ import (
 )
 
 const (
-	Wechat_Message_Type_Text    = 1
-	Wechat_Message_Type_Picture = 3
-	Wechat_Message_Type_Voice   = 34
-	Wechat_Message_Type_Video   = 43
-	Wechat_Message_Type_Emoji   = 47
-	Wechat_Message_Type_Misc    = 49
-	Wechat_Message_Type_System  = 10000
+	Wechat_Message_Type_Text       = 1
+	Wechat_Message_Type_Picture    = 3
+	Wechat_Message_Type_Voice      = 34
+	Wechat_Message_Type_Visit_Card = 42
+	Wechat_Message_Type_Video      = 43
+	Wechat_Message_Type_Emoji      = 47
+	Wechat_Message_Type_Location   = 48
+	Wechat_Message_Type_Misc       = 49
+	Wechat_Message_Type_Voip       = 50
+	Wechat_Message_Type_System     = 10000
 )
 
 const (
 	Wechat_Misc_Message_TEXT           = 1
+	Wechat_Misc_Message_Music          = 3
+	Wechat_Misc_Message_ThirdVideo     = 4
 	Wechat_Misc_Message_CardLink       = 5
 	Wechat_Misc_Message_File           = 6
 	Wechat_Misc_Message_CustomEmoji    = 8
+	Wechat_Misc_Message_ShareEmoji     = 15
 	Wechat_Misc_Message_ForwardMessage = 19
 	Wechat_Misc_Message_Applet         = 33
 	Wechat_Misc_Message_Applet2        = 36
+	Wechat_Misc_Message_Channels       = 51
 	Wechat_Misc_Message_Refer          = 57
 	Wechat_Misc_Message_Live           = 63
+	Wechat_Misc_Message_Game           = 68
 	Wechat_Misc_Message_Notice         = 87
 	Wechat_Misc_Message_Live2          = 88
+	Wechat_Misc_Message_TingListen     = 92
 	Wechat_Misc_Message_Transfer       = 2000
 	Wechat_Misc_Message_RedPacket      = 2003
 )
@@ -107,9 +117,43 @@ type ReferInfo struct {
 	Content     string `json:"Content"`
 }
 
+type PayInfo struct {
+	Type      int
+	Memo      string
+	BeginTime string
+	Feedesc   string
+}
+
+type VoipInfo struct {
+	Type int
+	Msg  string
+}
+
+type ChannelsInfo struct {
+	ThumbPath  string
+	ThumbCache string
+	NickName   string
+}
+
+type MusicInfo struct {
+	ThumbPath   string
+	Title       string
+	Description string
+	DisPlayName string
+	DataUrl     string
+}
+
+type LocationInfo struct {
+	Label     string
+	PoiName   string
+	X         string
+	Y         string
+	ThumbPath string
+}
+
 type WeChatMessage struct {
 	LocalId         int            `json:"LocalId"`
-	MsgSvrId        int64          `json:"MsgSvrId"`
+	MsgSvrId        string         `json:"MsgSvrId"`
 	Type            int            `json:"type"`
 	SubType         int            `json:"SubType"`
 	IsSender        int            `json:"IsSender"`
@@ -126,6 +170,12 @@ type WeChatMessage struct {
 	UserInfo        WeChatUserInfo `json:"userInfo"`
 	LinkInfo        LinkInfo       `json:"LinkInfo"`
 	ReferInfo       ReferInfo      `json:"ReferInfo"`
+	PayInfo         PayInfo        `json:"PayInfo"`
+	VoipInfo        VoipInfo       `json:"VoipInfo"`
+	VisitInfo       WeChatUserInfo `json:"VisitInfo"`
+	ChannelsInfo    ChannelsInfo   `json:"ChannelsInfo"`
+	MusicInfo       MusicInfo      `json:"MusicInfo"`
+	LocationInfo    LocationInfo   `json:"LocationInfo"`
 	compressContent []byte
 	bytesExtra      []byte
 }
@@ -400,7 +450,7 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 	List := &WeChatSessionList{}
 	List.Rows = make([]WeChatSession, 0)
 
-	querySql := fmt.Sprintf("select ifnull(strUsrName,'') as strUsrName,ifnull(strNickName,'') as strNickName,ifnull(strContent,'') as strContent, nTime from Session order by nOrder desc limit %d, %d;", pageIndex*pageSize, pageSize)
+	querySql := fmt.Sprintf("select ifnull(strUsrName,'') as strUsrName,ifnull(strNickName,'') as strNickName,ifnull(strContent,'') as strContent, nMsgType, nTime from Session order by nOrder desc limit %d, %d;", pageIndex*pageSize, pageSize)
 	dbRows, err := P.microMsg.Query(querySql)
 	if err != nil {
 		log.Println(err)
@@ -410,9 +460,10 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 
 	var strUsrName, strNickName, strContent string
 	var nTime uint64
+	var nMsgType int
 	for dbRows.Next() {
 		var session WeChatSession
-		err = dbRows.Scan(&strUsrName, &strNickName, &strContent, &nTime)
+		err = dbRows.Scan(&strUsrName, &strNickName, &strContent, &nMsgType, &nTime)
 		if err != nil {
 			log.Println(err)
 			continue
@@ -424,7 +475,7 @@ func (P *WechatDataProvider) WeChatGetSessionList(pageIndex int, pageSize int) (
 
 		session.UserName = strUsrName
 		session.NickName = strNickName
-		session.Content = revokemsg_parse(strContent)
+		session.Content = systemMsgParse(nMsgType, strContent)
 		session.Time = nTime
 		session.IsGroup = strings.HasSuffix(strUsrName, "@chatroom")
 		info, err := P.WechatGetUserInfoByNameOnCache(strUsrName)
@@ -555,14 +606,15 @@ func (P *WechatDataProvider) weChatGetMessageListByTime(userName string, time in
 			log.Println("rows.Scan failed", err)
 			return List, err
 		}
+
 		message.LocalId = localId
-		message.MsgSvrId = MsgSvrID
+		message.MsgSvrId = fmt.Sprintf("%d", MsgSvrID)
 		message.Type = Type
 		message.SubType = SubType
 		message.IsSender = IsSender
 		message.CreateTime = CreateTime
 		message.Talker = StrTalker
-		message.Content = revokemsg_parse(StrContent)
+		message.Content = systemMsgParse(Type, StrContent)
 		message.IsChatRoom = strings.HasSuffix(StrTalker, "@chatroom")
 		message.compressContent = make([]byte, len(CompressContent))
 		message.bytesExtra = make([]byte, len(BytesExtra))
@@ -572,6 +624,9 @@ func (P *WechatDataProvider) weChatGetMessageListByTime(userName string, time in
 		P.wechatMessageGetUserInfo(&message)
 		P.wechatMessageEmojiHandle(&message)
 		P.wechatMessageCompressContentHandle(&message)
+		P.wechatMessageVoipHandle(&message)
+		P.wechatMessageVisitHandke(&message)
+		P.wechatMessageLocationHandke(&message)
 		List.Rows = append(List.Rows, message)
 		List.Total += 1
 	}
@@ -805,8 +860,16 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 				msg.UserInfo.UserName = ext.Field2
 			}
 		case 3:
-			if len(ext.Field2) > 0 && (msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc) {
-				msg.ThumbPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+			if len(ext.Field2) > 0 {
+				if msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video || msg.Type == Wechat_Message_Type_Misc {
+					msg.ThumbPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+				}
+
+				if msg.Type == Wechat_Message_Type_Misc && (msg.SubType == Wechat_Misc_Message_Music || msg.SubType == Wechat_Misc_Message_TingListen) {
+					msg.MusicInfo.ThumbPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+				} else if msg.Type == Wechat_Message_Type_Location {
+					msg.LocationInfo.ThumbPath = P.prefixResPath + ext.Field2[len(P.SelfInfo.UserName):]
+				}
 			}
 		case 4:
 			if len(ext.Field2) > 0 {
@@ -822,7 +885,7 @@ func (P *WechatDataProvider) wechatMessageExtraHandle(msg *WeChatMessage) {
 	}
 
 	if msg.Type == Wechat_Message_Type_Voice {
-		msg.VoicePath = fmt.Sprintf("%s\\FileStorage\\Voice\\%d.mp3", P.prefixResPath, msg.MsgSvrId)
+		msg.VoicePath = fmt.Sprintf("%s\\FileStorage\\Voice\\%s.mp3", P.prefixResPath, msg.MsgSvrId)
 	}
 }
 
@@ -889,9 +952,8 @@ func (P *WechatDataProvider) wechatMessageCompressContentHandle(msg *WeChatMessa
 		log.Println("ReadFromBytes failed:", err)
 		return
 	}
-
 	root := NewxmlDocument(compMsg)
-	if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_CardLink {
+	if msg.Type == Wechat_Message_Type_Misc && isLinkSubType(msg.SubType) {
 		msg.LinkInfo.Title = root.FindElementValue("/msg/appmsg/title")
 		msg.LinkInfo.Description = root.FindElementValue("/msg/appmsg/des")
 		msg.LinkInfo.Url = root.FindElementValue("/msg/appmsg/url")
@@ -899,6 +961,10 @@ func (P *WechatDataProvider) wechatMessageCompressContentHandle(msg *WeChatMessa
 		appName := root.FindElementValue("/msg/appinfo/appname")
 		if len(msg.LinkInfo.DisPlayName) == 0 && len(appName) > 0 {
 			msg.LinkInfo.DisPlayName = appName
+		}
+		thumburl := root.FindElementValue("/msg/appmsg/thumburl")
+		if len(msg.ThumbPath) == 0 && len(thumburl) > 0 && strings.HasPrefix(thumburl, "http") {
+			msg.ThumbPath = thumburl
 		}
 	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_Refer {
 		msg.Content = root.FindElementValue("/msg/appmsg/title")
@@ -918,7 +984,78 @@ func (P *WechatDataProvider) wechatMessageCompressContentHandle(msg *WeChatMessa
 			msg.ReferInfo.Content = root.FindElementValue("/msg/appmsg/title")
 			msg.ReferInfo.SubType, _ = strconv.Atoi(root.FindElementValue("/msg/appmsg/type"))
 		}
+	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_Transfer {
+		msg.PayInfo.Type, _ = strconv.Atoi(root.FindElementValue("/msg/appmsg/wcpayinfo/paysubtype"))
+		msg.PayInfo.Feedesc = root.FindElementValue("/msg/appmsg/wcpayinfo/feedesc")
+		msg.PayInfo.BeginTime = root.FindElementValue("/msg/appmsg/wcpayinfo/begintransfertime")
+		msg.PayInfo.Memo = root.FindElementValue("/msg/appmsg/wcpayinfo/pay_memo")
+	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_TEXT {
+		msg.Content = root.FindElementValue("/msg/appmsg/title")
+	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_Channels {
+		msg.ChannelsInfo.NickName = root.FindElementValue("/msg/appmsg/finderFeed/nickname")
+		msg.ChannelsInfo.ThumbPath = root.FindElementValue("/msg/appmsg/finderFeed/mediaList/media/thumbUrl")
+		msg.ChannelsInfo.ThumbPath = P.urlconvertCacheName(msg.ChannelsInfo.ThumbPath, msg.CreateTime)
+	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_Live {
+		msg.ChannelsInfo.NickName = root.FindElementValue("/msg/appmsg/finderLive/nickname")
+		msg.ChannelsInfo.ThumbPath = root.FindElementValue("/msg/appmsg/finderLive/media/coverUrl")
+		msg.ChannelsInfo.ThumbPath = P.urlconvertCacheName(msg.ChannelsInfo.ThumbPath, msg.CreateTime)
+	} else if msg.Type == Wechat_Message_Type_Misc && (msg.SubType == Wechat_Misc_Message_Music || msg.SubType == Wechat_Misc_Message_TingListen) {
+		msg.MusicInfo.Title = root.FindElementValue("/msg/appmsg/title")
+		msg.MusicInfo.Description = root.FindElementValue("/msg/appmsg/des")
+		msg.MusicInfo.DataUrl = root.FindElementValue("/msg/appmsg/dataurl")
+		msg.MusicInfo.DisPlayName = root.FindElementValue("/msg/appinfo/appname")
 	}
+}
+
+func (P *WechatDataProvider) wechatMessageVoipHandle(msg *WeChatMessage) {
+	if msg.Type != Wechat_Message_Type_Voip {
+		return
+	}
+
+	xmlMsg := etree.NewDocument()
+	if err := xmlMsg.ReadFromBytes([]byte(msg.Content)); err != nil {
+		// os.WriteFile("D:\\tmp\\"+string(msg.LocalId)+".xml", unCompressContent[:ulen], 0600)
+		log.Println("ReadFromBytes failed:", err)
+		return
+	}
+	root := NewxmlDocument(xmlMsg)
+	msg.VoipInfo.Type, _ = strconv.Atoi(root.FindElementValue("/voipmsg/VoIPBubbleMsg/room_type"))
+	msg.VoipInfo.Msg = root.FindElementValue("/voipmsg/VoIPBubbleMsg/msg")
+}
+
+func (P *WechatDataProvider) wechatMessageVisitHandke(msg *WeChatMessage) {
+	if msg.Type != Wechat_Message_Type_Visit_Card {
+		return
+	}
+
+	attr := utils.HtmlMsgGetAttr(msg.Content, "msg")
+	userName, exists := attr["username"]
+	if !exists {
+		return
+	}
+
+	userInfo, err := P.WechatGetUserInfoByNameOnCache(userName)
+	if err == nil {
+		msg.VisitInfo = *userInfo
+	} else {
+		msg.VisitInfo.UserName = userName
+		msg.VisitInfo.Alias = attr["alias"]
+		msg.VisitInfo.NickName = attr["nickname"]
+		msg.VisitInfo.SmallHeadImgUrl = attr["smallheadimgurl"]
+		msg.VisitInfo.BigHeadImgUrl = attr["bigheadimgurl"]
+	}
+}
+
+func (P *WechatDataProvider) wechatMessageLocationHandke(msg *WeChatMessage) {
+	if msg.Type != Wechat_Message_Type_Location {
+		return
+	}
+
+	attr := utils.HtmlMsgGetAttr(msg.Content, "location")
+	msg.LocationInfo.Label = attr["label"]
+	msg.LocationInfo.PoiName = attr["poiname"]
+	msg.LocationInfo.X = attr["x"]
+	msg.LocationInfo.Y = attr["y"]
 }
 
 func (P *WechatDataProvider) wechatMessageGetUserInfo(msg *WeChatMessage) {
@@ -1031,9 +1168,11 @@ func weChatMessageContains(msg *WeChatMessage, chars string) bool {
 	switch msg.Type {
 	case Wechat_Message_Type_Text:
 		return strings.Contains(msg.Content, chars)
+	case Wechat_Message_Type_Location:
+		return strings.Contains(msg.LocationInfo.Label, chars) || strings.Contains(msg.LocationInfo.PoiName, chars)
 	case Wechat_Message_Type_Misc:
 		switch msg.SubType {
-		case Wechat_Misc_Message_CardLink:
+		case Wechat_Misc_Message_CardLink, Wechat_Misc_Message_ThirdVideo, Wechat_Misc_Message_Applet, Wechat_Misc_Message_Applet2:
 			return strings.Contains(msg.LinkInfo.Title, chars) || strings.Contains(msg.LinkInfo.Description, chars)
 		case Wechat_Misc_Message_Refer:
 			return strings.Contains(msg.Content, chars)
@@ -1056,7 +1195,7 @@ func weChatMessageTypeFilter(msg *WeChatMessage, msgType string) bool {
 	case "图片与视频":
 		return msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video
 	case "链接":
-		return msg.Type == Wechat_Misc_Message_CardLink || msg.SubType == Wechat_Misc_Message_CardLink
+		return msg.Type == Wechat_Message_Type_Misc && (msg.SubType == Wechat_Misc_Message_CardLink || msg.SubType == Wechat_Misc_Message_ThirdVideo)
 	default:
 		if strings.HasPrefix(msgType, "群成员") {
 			userName := msgType[len("群成员"):]
@@ -1219,11 +1358,36 @@ func WechatGetAccountInfo(resPath, prefixRes, accountName string) (*WeChatAccoun
 	return info, nil
 }
 
-func revokemsg_parse(content string) string {
-	if strings.HasPrefix(content, "<revokemsg>") && strings.HasSuffix(content, "</revokemsg>") {
-		trimmed := strings.TrimSuffix(strings.TrimPrefix(content, "<revokemsg>"), "</revokemsg>")
-		return trimmed
+func systemMsgParse(msgType int, content string) string {
+	if msgType != Wechat_Message_Type_System {
+		return content
 	}
 
-	return content
+	return utils.Html2Text(content)
+}
+
+func (P *WechatDataProvider) urlconvertCacheName(url string, timestamp int64) string {
+	t := time.Unix(timestamp, 0)
+	yearMonth := t.Format("2006-01")
+	md5String := utils.Hash256Sum([]byte(url))
+	realPath := fmt.Sprintf("%s\\FileStorage\\Cache\\%s\\%s.jpg", P.resPath, yearMonth, md5String)
+	path := fmt.Sprintf("%s\\FileStorage\\Cache\\%s\\%s.jpg", P.prefixResPath, yearMonth, md5String)
+
+	if _, err := os.Stat(realPath); err == nil {
+		return path
+	}
+
+	return url
+}
+
+func isLinkSubType(subType int) bool {
+	targetSubTypes := map[int]bool{
+		Wechat_Misc_Message_CardLink:   true,
+		Wechat_Misc_Message_ThirdVideo: true,
+		Wechat_Misc_Message_ShareEmoji: true,
+		Wechat_Misc_Message_Applet:     true,
+		Wechat_Misc_Message_Applet2:    true,
+		Wechat_Misc_Message_Game:       true,
+	}
+	return targetSubTypes[subType]
 }
