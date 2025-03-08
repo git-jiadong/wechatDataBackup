@@ -23,7 +23,7 @@ const (
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
 	configExportPathKey  = "exportPath"
-	appVersion           = "v1.1.0"
+	appVersion           = "v1.2.0"
 )
 
 type FileLoader struct {
@@ -183,14 +183,15 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
+	return false
+}
 
+func (a *App) shutdown(ctx context.Context) {
 	if a.provider != nil {
 		a.provider.WechatWechatDataProviderClose()
 		a.provider = nil
 	}
-
-	return false
-
+	log.Printf("App Version %s exit!", appVersion)
 }
 
 func (a *App) GetWeChatAllInfo() string {
@@ -712,4 +713,160 @@ func (a *App) SaveFileDialog(file string, alisa string) string {
 	}
 
 	return ""
+}
+
+func (a *App) GetSessionLastTime(userName string) string {
+	if a.provider == nil || userName == "" {
+		lastTime := &wechat.WeChatLastTime{}
+		lastTimeString, _ := json.Marshal(lastTime)
+		return string(lastTimeString)
+	}
+
+	lastTime := a.provider.WeChatGetSessionLastTime(userName)
+
+	lastTimeString, _ := json.Marshal(lastTime)
+
+	return string(lastTimeString)
+}
+
+func (a *App) SetSessionLastTime(userName string, stamp int64, messageId string) string {
+	if a.provider == nil {
+		return ""
+	}
+
+	lastTime := &wechat.WeChatLastTime{
+		UserName:  userName,
+		Timestamp: stamp,
+		MessageId: messageId,
+	}
+	err := a.provider.WeChatSetSessionLastTime(lastTime)
+	if err != nil {
+		log.Println("WeChatSetSessionLastTime failed:", err.Error())
+		return err.Error()
+	}
+
+	return ""
+}
+
+func (a *App) SetSessionBookMask(userName, tag, info string) string {
+	if a.provider == nil || userName == "" {
+		return "invaild params"
+	}
+	err := a.provider.WeChatSetSessionBookMask(userName, tag, info)
+	if err != nil {
+		log.Println("WeChatSetSessionBookMask failed:", err.Error())
+		return err.Error()
+	}
+
+	return ""
+}
+
+func (a *App) DelSessionBookMask(markId string) string {
+	if a.provider == nil || markId == "" {
+		return "invaild params"
+	}
+
+	err := a.provider.WeChatDelSessionBookMask(markId)
+	if err != nil {
+		log.Println("WeChatDelSessionBookMask failed:", err.Error())
+		return err.Error()
+	}
+
+	return ""
+}
+
+func (a *App) GetSessionBookMaskList(userName string) string {
+	if a.provider == nil || userName == "" {
+		return "invaild params"
+	}
+	markLIst, err := a.provider.WeChatGetSessionBookMaskList(userName)
+	if err != nil {
+		log.Println("WeChatGetSessionBookMaskList failed:", err.Error())
+		_list := &wechat.WeChatBookMarkList{}
+		_listString, _ := json.Marshal(_list)
+		return string(_listString)
+	}
+
+	markLIstString, _ := json.Marshal(markLIst)
+	return string(markLIstString)
+}
+
+func (a *App) SelectedDirDialog(title string) string {
+	dialogOptions := runtime.OpenDialogOptions{
+		Title: title,
+	}
+	selectedDir, err := runtime.OpenDirectoryDialog(a.ctx, dialogOptions)
+	if err != nil {
+		log.Println("OpenDirectoryDialog:", err)
+		return ""
+	}
+
+	if selectedDir == "" {
+		return ""
+	}
+
+	return selectedDir
+}
+
+func (a *App) ExportWeChatDataByUserName(userName, path string) string {
+	if a.provider == nil || userName == "" || path == "" {
+		return "invaild params" + userName
+	}
+
+	if !utils.PathIsCanWriteFile(path) {
+		log.Println("PathIsCanWriteFile: " + path)
+		return "PathIsCanWriteFile: " + path
+	}
+
+	exPath := path + "\\" + "wechatDataBackup_" + userName
+	if _, err := os.Stat(exPath); err != nil {
+		os.MkdirAll(exPath, os.ModePerm)
+	} else {
+		return "path exist:" + exPath
+	}
+
+	log.Println("ExportWeChatDataByUserName:", userName, exPath)
+	err := a.provider.WeChatExportDataByUserName(userName, exPath)
+	if err != nil {
+		log.Println("WeChatExportDataByUserName failed:", err)
+		return "WeChatExportDataByUserName failed:" + err.Error()
+	}
+
+	exeSrcPath := a.FLoader.FilePrefix + "\\" + "wechatDataBackup.exe"
+	exeDstPath := exPath + "\\" + "wechatDataBackup.exe"
+	_, err = utils.CopyFile(exeSrcPath, exeDstPath)
+	if err != nil {
+		log.Println("CopyFile:", err)
+		return "CopyFile:" + err.Error()
+	}
+
+	config := map[string]interface{}{
+		"exportpath": ".\\",
+		"userconfig": map[string]interface{}{
+			"defaultuser": a.defaultUser,
+			"users":       []string{a.defaultUser},
+		},
+	}
+
+	configJson, err := json.MarshalIndent(config, "", "	")
+	if err != nil {
+		log.Println("MarshalIndent:", err)
+		return "MarshalIndent:" + err.Error()
+	}
+
+	configPath := exPath + "\\" + "config.json"
+	err = os.WriteFile(configPath, configJson, os.ModePerm)
+	if err != nil {
+		log.Println("WriteFile:", err)
+		return "WriteFile:" + err.Error()
+	}
+
+	return ""
+}
+
+func (a *App) GetAppIsShareData() bool {
+	if a.provider != nil {
+		return a.provider.IsShareData
+	}
+	return false
 }

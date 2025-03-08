@@ -130,9 +130,10 @@ type VoipInfo struct {
 }
 
 type ChannelsInfo struct {
-	ThumbPath  string
-	ThumbCache string
-	NickName   string
+	ThumbPath   string
+	ThumbCache  string
+	NickName    string
+	Description string
 }
 
 type MusicInfo struct {
@@ -219,6 +220,23 @@ type WeChatAccountInfo struct {
 	LocalHeadImgUrl string `json:"LocalHeadImgUrl"`
 }
 
+type WeChatLastTime struct {
+	UserName  string `json:"UserName"`
+	Timestamp int64  `json:"Timestamp"`
+	MessageId string `json:"MessageId"`
+}
+
+type WeChatBookMark struct {
+	MarkId string `json:"MarkId"`
+	Tag    string `json:"Tag"`
+	Info   string `json:"Info"`
+}
+
+type WeChatBookMarkList struct {
+	Marks []WeChatBookMark `json:"Marks"`
+	Total int              `json:"Total"`
+}
+
 type wechatMsgDB struct {
 	path      string
 	db        *sql.DB
@@ -231,17 +249,20 @@ type WechatDataProvider struct {
 	prefixResPath string
 	microMsg      *sql.DB
 	openIMContact *sql.DB
+	userData      *sql.DB
 	msgDBs        []*wechatMsgDB
 	userInfoMap   map[string]WeChatUserInfo
 	userInfoMtx   sync.Mutex
 
 	SelfInfo    *WeChatUserInfo
 	ContactList *WeChatContactList
+	IsShareData bool
 }
 
 const (
 	MicroMsgDB      = "MicroMsg.db"
 	OpenIMContactDB = "OpenIMContact.db"
+	UserDataDB      = "UserData.db"
 )
 
 type byTime []*wechatMsgDB
@@ -299,6 +320,26 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 		}
 	}
 
+	UserDataDBPath := resPath + "\\Msg\\" + UserDataDB
+	userData := openUserDataDB(UserDataDBPath)
+	if userData == nil {
+		log.Printf("open db %s error: %v", UserDataDBPath, err)
+		return provider, err
+	}
+
+	msgDBPath := fmt.Sprintf("%s\\Msg\\Multi\\MSG.db", provider.resPath)
+	if _, err := os.Stat(msgDBPath); err == nil {
+		log.Println("msgDBPath", msgDBPath)
+		msgDB, err := wechatOpenMsgDB(msgDBPath)
+		if err != nil {
+			log.Printf("open db %s error: %v", msgDBPath, err)
+		} else {
+			provider.msgDBs = append(provider.msgDBs, msgDB)
+			log.Printf("MSG.db start %d - %d end\n", msgDB.startTime, msgDB.endTime)
+			provider.IsShareData = true
+		}
+	}
+
 	index := 0
 	for {
 		msgDBPath := fmt.Sprintf("%s\\Msg\\Multi\\MSG%d.db", provider.resPath, index)
@@ -324,6 +365,7 @@ func CreateWechatDataProvider(resPath string, prefixRes string) (*WechatDataProv
 	provider.userInfoMap = make(map[string]WeChatUserInfo)
 	provider.microMsg = microMsg
 	provider.openIMContact = openIMContact
+	provider.userData = userData
 	provider.SelfInfo, err = provider.WechatGetUserInfoByNameOnCache(userName)
 	if err != nil {
 		log.Printf("WechatGetUserInfoByName %s failed: %v", userName, err)
@@ -357,6 +399,13 @@ func (P *WechatDataProvider) WechatWechatDataProviderClose() {
 		}
 	}
 
+	if P.userData != nil {
+		err := P.userData.Close()
+		if err != nil {
+			log.Println("db close:", err)
+		}
+	}
+
 	for _, db := range P.msgDBs {
 		err := db.db.Close()
 		if err != nil {
@@ -374,7 +423,7 @@ func (P *WechatDataProvider) WechatGetUserInfoByName(name string) (*WeChatUserIn
 	// log.Println(querySql)
 	err := P.microMsg.QueryRow(querySql).Scan(&UserName, &Alias, &ReMark, &NickName)
 	if err != nil {
-		log.Println("not found User:", err)
+		// log.Println("not found User:", err)
 		return info, err
 	}
 
@@ -580,9 +629,9 @@ func (P *WechatDataProvider) weChatGetMessageListByTime(userName string, time in
 		return List, nil
 	}
 
-	sqlFormat := "select localId,MsgSvrID,Type,SubType,IsSender,CreateTime,ifnull(StrTalker,'') as StrTalker, ifnull(StrContent,'') as StrContent,ifnull(CompressContent,'') as CompressContent,ifnull(BytesExtra,'') as BytesExtra from MSG Where StrTalker='%s' And CreateTime<=%d order by CreateTime desc limit %d;"
+	sqlFormat := "select localId,MsgSvrID,Type,SubType,IsSender,CreateTime,ifnull(StrTalker,'') as StrTalker, ifnull(StrContent,'') as StrContent,ifnull(CompressContent,'') as CompressContent,ifnull(BytesExtra,'') as BytesExtra from MSG Where StrTalker='%s' And CreateTime<=%d order by Sequence desc limit %d;"
 	if direction == Message_Search_Backward {
-		sqlFormat = "select localId,MsgSvrID,Type,SubType,IsSender,CreateTime,ifnull(StrTalker,'') as StrTalker, ifnull(StrContent,'') as StrContent,ifnull(CompressContent,'') as CompressContent,ifnull(BytesExtra,'') as BytesExtra from ( select localId, MsgSvrID, Type, SubType, IsSender, CreateTime, StrTalker, StrContent, CompressContent, BytesExtra FROM MSG Where StrTalker='%s' And CreateTime>%d order by CreateTime asc limit %d) AS SubQuery order by CreateTime desc;"
+		sqlFormat = "select localId,MsgSvrID,Type,SubType,IsSender,CreateTime,ifnull(StrTalker,'') as StrTalker, ifnull(StrContent,'') as StrContent,ifnull(CompressContent,'') as CompressContent,ifnull(BytesExtra,'') as BytesExtra from ( select localId, MsgSvrID, Type, SubType, IsSender, CreateTime, Sequence, StrTalker, StrContent, CompressContent, BytesExtra FROM MSG Where StrTalker='%s' And CreateTime>%d order by Sequence asc limit %d) AS SubQuery order by Sequence desc;"
 	}
 	querySql := fmt.Sprintf(sqlFormat, userName, time, pageSize)
 	log.Println(querySql)
@@ -994,10 +1043,12 @@ func (P *WechatDataProvider) wechatMessageCompressContentHandle(msg *WeChatMessa
 	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_Channels {
 		msg.ChannelsInfo.NickName = root.FindElementValue("/msg/appmsg/finderFeed/nickname")
 		msg.ChannelsInfo.ThumbPath = root.FindElementValue("/msg/appmsg/finderFeed/mediaList/media/thumbUrl")
+		msg.ChannelsInfo.Description = root.FindElementValue("/msg/appmsg/finderFeed/desc")
 		msg.ChannelsInfo.ThumbPath = P.urlconvertCacheName(msg.ChannelsInfo.ThumbPath, msg.CreateTime)
 	} else if msg.Type == Wechat_Message_Type_Misc && msg.SubType == Wechat_Misc_Message_Live {
 		msg.ChannelsInfo.NickName = root.FindElementValue("/msg/appmsg/finderLive/nickname")
 		msg.ChannelsInfo.ThumbPath = root.FindElementValue("/msg/appmsg/finderLive/media/coverUrl")
+		msg.ChannelsInfo.Description = root.FindElementValue("/msg/appmsg/finderLive/desc")
 		msg.ChannelsInfo.ThumbPath = P.urlconvertCacheName(msg.ChannelsInfo.ThumbPath, msg.CreateTime)
 	} else if msg.Type == Wechat_Message_Type_Misc && (msg.SubType == Wechat_Misc_Message_Music || msg.SubType == Wechat_Misc_Message_TingListen) {
 		msg.MusicInfo.Title = root.FindElementValue("/msg/appmsg/title")
@@ -1043,6 +1094,11 @@ func (P *WechatDataProvider) wechatMessageVisitHandke(msg *WeChatMessage) {
 		msg.VisitInfo.NickName = attr["nickname"]
 		msg.VisitInfo.SmallHeadImgUrl = attr["smallheadimgurl"]
 		msg.VisitInfo.BigHeadImgUrl = attr["bigheadimgurl"]
+		localHeadImgPath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", P.resPath, userName)
+		relativePath := fmt.Sprintf("%s\\FileStorage\\HeadImage\\%s.headimg", P.prefixResPath, userName)
+		if _, err = os.Stat(localHeadImgPath); err == nil {
+			msg.VisitInfo.LocalHeadImgUrl = relativePath
+		}
 	}
 }
 
@@ -1068,7 +1124,7 @@ func (P *WechatDataProvider) wechatMessageGetUserInfo(msg *WeChatMessage) {
 
 	pinfo, err := P.WechatGetUserInfoByNameOnCache(who)
 	if err != nil {
-		log.Println("WechatGetUserInfoByNameOnCache:", err)
+		// log.Println("WechatGetUserInfoByNameOnCache:", err)
 		return
 	}
 
@@ -1196,6 +1252,10 @@ func weChatMessageTypeFilter(msg *WeChatMessage, msgType string) bool {
 		return msg.Type == Wechat_Message_Type_Picture || msg.Type == Wechat_Message_Type_Video
 	case "链接":
 		return msg.Type == Wechat_Message_Type_Misc && (msg.SubType == Wechat_Misc_Message_CardLink || msg.SubType == Wechat_Misc_Message_ThirdVideo)
+	case "语音":
+		return msg.Type == Wechat_Message_Type_Voice
+	case "通话":
+		return msg.Type == Wechat_Message_Type_Voip
 	default:
 		if strings.HasPrefix(msgType, "群成员") {
 			userName := msgType[len("群成员"):]
@@ -1255,7 +1315,7 @@ func (P *WechatDataProvider) WechatGetUserInfoByNameOnCache(name string) (*WeCha
 		pinfo, err = P.WechatGetUserInfoByName(name)
 	}
 	if err != nil {
-		log.Printf("WechatGetUserInfoByName %s failed: %v\n", name, err)
+		// log.Printf("WechatGetUserInfoByName %s failed: %v\n", name, err)
 		return nil, err
 	}
 
@@ -1390,4 +1450,718 @@ func isLinkSubType(subType int) bool {
 		Wechat_Misc_Message_Game:       true,
 	}
 	return targetSubTypes[subType]
+}
+
+func openUserDataDB(path string) *sql.DB {
+	if _, err := os.Stat(path); err == nil {
+		sql, err := sql.Open("sqlite3", path)
+		if err != nil {
+			log.Printf("open db %s error: %v", path, err)
+			return nil
+		}
+
+		return sql
+	}
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		log.Printf("open db %s error: %v", path, err)
+		return nil
+	}
+
+	createLastTimeTable := `
+	CREATE TABLE IF NOT EXISTS lastTime (
+		localId INTEGER PRIMARY KEY AUTOINCREMENT,
+		userName TEXT,
+		timestamp INT,
+		messageId TEXT,
+		Reserved0 INT DEFAULT 0,
+		Reserved1 INT DEFAULT 0,
+		Reserved2 TEXT,
+		Reserved3 TEXT
+	);`
+
+	_, err = db.Exec(createLastTimeTable)
+	if err != nil {
+		log.Printf("create lastTime table failed: %v", err)
+		db.Close()
+		return nil
+	}
+
+	createBookMarkTable := `
+	CREATE TABLE IF NOT EXISTS bookMark (
+		localId INTEGER PRIMARY KEY AUTOINCREMENT,
+		userName TEXT,
+		markId TEXT,
+		tag TEXT,
+		info TEXT,
+		Reserved0 INT DEFAULT 0,
+		Reserved1 INT DEFAULT 0,
+		Reserved2 TEXT,
+		Reserved3 TEXT
+	);`
+
+	_, err = db.Exec(createBookMarkTable)
+	if err != nil {
+		log.Printf("create bookMark table failed: %v", err)
+		db.Close()
+		return nil
+	}
+
+	return db
+}
+
+func (P *WechatDataProvider) WeChatGetSessionLastTime(userName string) *WeChatLastTime {
+	lastTime := &WeChatLastTime{}
+	if P.userData == nil {
+		log.Println("userData DB is nill")
+		return lastTime
+	}
+
+	var timestamp int64
+	var messageId string
+	querySql := fmt.Sprintf("select timestamp, messageId from lastTime where userName='%s';", userName)
+	err := P.userData.QueryRow(querySql).Scan(&timestamp, &messageId)
+	if err != nil {
+		log.Println("select DB timestamp failed:", err)
+		return lastTime
+	}
+
+	lastTime.UserName = userName
+	lastTime.MessageId = messageId
+	lastTime.Timestamp = timestamp
+	return lastTime
+}
+
+func (P *WechatDataProvider) WeChatSetSessionLastTime(lastTime *WeChatLastTime) error {
+	var count int
+	querySql := fmt.Sprintf("select COUNT(*) from lastTime where userName='%s';", lastTime.UserName)
+	err := P.userData.QueryRow(querySql).Scan(&count)
+	if err != nil {
+		log.Println("select DB timestamp count failed:", err)
+		return err
+	}
+
+	if count > 0 {
+		_, err := P.userData.Exec("UPDATE lastTime SET timestamp = ?, messageId = ? WHERE userName = ?", lastTime.Timestamp, lastTime.MessageId, lastTime.UserName)
+		if err != nil {
+			return fmt.Errorf("update timestamp failed: %v", err)
+		}
+	} else {
+		_, err := P.userData.Exec("INSERT INTO lastTime (userName, timestamp, messageId) VALUES (?, ?, ?)", lastTime.UserName, lastTime.Timestamp, lastTime.MessageId)
+		if err != nil {
+			return fmt.Errorf("insert failed: %v", err)
+		}
+	}
+
+	log.Printf("WeChatSetSessionLastTime %s %d %s done!\n", lastTime.UserName, lastTime.Timestamp, lastTime.MessageId)
+	return nil
+}
+
+func (P *WechatDataProvider) WeChatSetSessionBookMask(userName, tag, info string) error {
+	markId := utils.Hash256Sum([]byte(info))
+	querySql := fmt.Sprintf("select COUNT(*) from bookMark where markId='%s';", markId)
+	var count int
+
+	err := P.userData.QueryRow(querySql).Scan(&count)
+	if err != nil {
+		log.Println("select DB markId count failed:", err)
+		return err
+	}
+
+	if count > 0 {
+		log.Printf("exist userName: %s, tag: %s, info: %s, markId: %s\n", userName, tag, info, markId)
+		return nil
+	}
+
+	_, err = P.userData.Exec("INSERT INTO bookMark (userName, markId, tag, info) VALUES (?, ?, ?, ?)", userName, markId, tag, info)
+	if err != nil {
+		return fmt.Errorf("insert failed: %v", err)
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) WeChatDelSessionBookMask(markId string) error {
+	querySql := fmt.Sprintf("select COUNT(*) from bookMark where markId='%s';", markId)
+	var count int
+
+	err := P.userData.QueryRow(querySql).Scan(&count)
+	if err != nil {
+		log.Println("select DB markId count failed:", err)
+		return err
+	}
+
+	if count > 0 {
+		_, err = P.userData.Exec("DELETE from bookMark where markId=?", markId)
+		if err != nil {
+			return fmt.Errorf("delete failed: %v", err)
+		}
+	} else {
+		log.Printf("markId %s not exits\n", markId)
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) WeChatGetSessionBookMaskList(userName string) (*WeChatBookMarkList, error) {
+	markList := &WeChatBookMarkList{}
+	markList.Marks = make([]WeChatBookMark, 0)
+	markList.Total = 0
+
+	querySql := fmt.Sprintf("select markId, tag, info from bookMark where userName='%s';", userName)
+	log.Println("querySql:", querySql)
+
+	rows, err := P.userData.Query(querySql)
+	if err != nil {
+		log.Printf("%s failed %v\n", querySql, err)
+		return markList, err
+	}
+	defer rows.Close()
+
+	var markId, tag, info string
+	for rows.Next() {
+		err = rows.Scan(&markId, &tag, &info)
+		if err != nil {
+			log.Println("rows.Scan failed", err)
+			return markList, err
+		}
+
+		markList.Marks = append(markList.Marks, WeChatBookMark{MarkId: markId, Tag: tag, Info: info})
+		markList.Total += 1
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Println("rows.Scan failed", err)
+		return markList, err
+	}
+
+	return markList, nil
+}
+
+func (P *WechatDataProvider) WeChatExportDataByUserName(userName, exportPath string) error {
+
+	err := P.WeChatExportDBByUserName(userName, exportPath)
+	if err != nil {
+		log.Println("WeChatExportDBByUserName:", err)
+		return err
+	}
+
+	err = P.WeChatExportFileByUserName(userName, exportPath)
+	if err != nil {
+		log.Println("WeChatExportFileByUserName:", err)
+		return err
+	}
+	log.Println("WeChatExportDataByUserName done")
+	return nil
+}
+
+func (P *WechatDataProvider) WeChatExportDBByUserName(userName, exportPath string) error {
+	msgPath := fmt.Sprintf("%s\\User\\%s\\Msg", exportPath, P.SelfInfo.UserName)
+	multiPath := fmt.Sprintf("%s\\Multi", msgPath)
+	if _, err := os.Stat(multiPath); err != nil {
+		if err := os.MkdirAll(multiPath, 0644); err != nil {
+			log.Printf("MkdirAll %s failed: %v\n", multiPath, err)
+			return err
+		}
+	}
+
+	err := P.weChatExportMicroMsgDBByUserName(userName, msgPath)
+	if err != nil {
+		log.Println("weChatExportMicroMsgDBByUserName failed:", err)
+		return err
+	}
+
+	err = P.weChatExportMsgDBByUserName(userName, multiPath)
+	if err != nil {
+		log.Println("weChatExportMsgDBByUserName failed:", err)
+		return err
+	}
+
+	err = P.weChatExportUserDataDBByUserName(userName, msgPath)
+	if err != nil {
+		log.Println("weChatExportUserDataDBByUserName failed:", err)
+		return err
+	}
+
+	err = P.weChatExportOpenIMContactDBByUserName(userName, msgPath)
+	if err != nil {
+		log.Println("weChatExportOpenIMContactDBByUserName failed:", err)
+		return err
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) weChatExportMicroMsgDBByUserName(userName, exportPath string) error {
+	exMicroMsgDBPath := exportPath + "\\" + MicroMsgDB
+	if _, err := os.Stat(exMicroMsgDBPath); err == nil {
+		log.Println("exist", exMicroMsgDBPath)
+		return errors.New("exist " + exMicroMsgDBPath)
+	}
+
+	exMicroMsgDB, err := sql.Open("sqlite3", exMicroMsgDBPath)
+	if err != nil {
+		log.Println("db open", err)
+		return err
+	}
+	defer exMicroMsgDB.Close()
+
+	tables := []string{"Contact", "ContactHeadImgUrl", "Session"}
+	IsGroup := false
+	if strings.HasSuffix(userName, "@chatroom") {
+		IsGroup = true
+		tables = append(tables, "ChatRoom", "ChatRoomInfo")
+	}
+
+	err = wechatCopyDBTables(exMicroMsgDB, P.microMsg, tables)
+	if err != nil {
+		log.Println("wechatCopyDBTables:", err)
+		return err
+	}
+
+	copyContactData := func(users []string) error {
+		columns := "UserName, Alias, EncryptUserName, DelFlag, Type, VerifyFlag, Reserved1, Reserved2, Reserved3, Reserved4, Remark, NickName, LabelIDList, DomainList, ChatRoomType, PYInitial, QuanPin, RemarkPYInitial, RemarkQuanPin, BigHeadImgUrl, SmallHeadImgUrl, HeadImgMd5, ChatRoomNotify, Reserved5, Reserved6, Reserved7, ExtraBuf, Reserved8, Reserved9, Reserved10, Reserved11"
+		err = wechatCopyTableData(exMicroMsgDB, P.microMsg, "Contact", columns, "UserName", users)
+		if err != nil {
+			log.Println("wechatCopyTableData Contact:", err)
+			return err
+		}
+
+		columns = "usrName, smallHeadImgUrl, bigHeadImgUrl, headImgMd5, reverse0, reverse1"
+		err = wechatCopyTableData(exMicroMsgDB, P.microMsg, "ContactHeadImgUrl", columns, "usrName", users)
+		if err != nil {
+			log.Println("wechatCopyTableData ContactHeadImgUrl:", err)
+			return err
+		}
+
+		return nil
+	}
+
+	err = copyContactData([]string{userName, P.SelfInfo.UserName})
+	if err != nil {
+		log.Println("copyContactData:", err)
+		return err
+	}
+
+	columns := "strUsrName, nOrder, nUnReadCount, parentRef, Reserved0, Reserved1, strNickName, nStatus, nIsSend, strContent, nMsgType, nMsgLocalID, nMsgStatus, nTime, editContent, othersAtMe, Reserved2, Reserved3, Reserved4, Reserved5, bytesXml"
+	err = wechatCopyTableData(exMicroMsgDB, P.microMsg, "Session", columns, "strUsrName", []string{userName})
+	if err != nil {
+		log.Println("wechatCopyTableData Session:", err)
+		return err
+	}
+
+	if !IsGroup {
+		return nil
+	}
+
+	uList, err := P.WeChatGetChatRoomUserList(userName)
+	if err != nil {
+		log.Println("WeChatGetChatRoomUserList failed:", err)
+		return err
+	}
+
+	userNames := make([]string, 0, 100)
+	for i := range uList.Users {
+		userNames = append(userNames, uList.Users[i].UserName)
+		if len(userNames) >= 100 || i == len(uList.Users)-1 {
+			err = copyContactData(userNames)
+			if err != nil {
+				log.Println("copyContactData:", err)
+			}
+			userNames = userNames[:0]
+		}
+	}
+
+	columns = "ChatRoomName, UserNameList, DisplayNameList, ChatRoomFlag, Owner, IsShowName, SelfDisplayName, Reserved1, Reserved2, Reserved3, Reserved4, Reserved5, Reserved6, RoomData, Reserved7, Reserved8"
+	err = wechatCopyTableData(exMicroMsgDB, P.microMsg, "ChatRoom", columns, "ChatRoomName", []string{userName})
+	if err != nil {
+		log.Println("wechatCopyTableData ChatRoom:", err)
+		return err
+	}
+
+	columns = "ChatRoomName, Announcement, InfoVersion, AnnouncementEditor, AnnouncementPublishTime, ChatRoomStatus, Reserved1, Reserved2, Reserved3, Reserved4, Reserved5, Reserved6, Reserved7, Reserved8"
+	err = wechatCopyTableData(exMicroMsgDB, P.microMsg, "ChatRoomInfo", columns, "ChatRoomName", []string{userName})
+	if err != nil {
+		log.Println("wechatCopyTableData ChatRoom:", err)
+		return err
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) weChatExportMsgDBByUserName(userName, exportPath string) error {
+	exMsgDBPath := exportPath + "\\" + "MSG.db"
+	if _, err := os.Stat(exMsgDBPath); err == nil {
+		log.Println("exist", exMsgDBPath)
+		return errors.New("exist " + exMsgDBPath)
+	}
+
+	exMsgDB, err := sql.Open("sqlite3", exMsgDBPath)
+	if err != nil {
+		log.Println("db open", err)
+		return err
+	}
+	defer exMsgDB.Close()
+
+	if len(P.msgDBs) == 0 {
+		return fmt.Errorf("P.msgDBs len = 0")
+	}
+
+	tables := []string{"MSG", "Name2ID"}
+	err = wechatCopyDBTables(exMsgDB, P.msgDBs[0].db, tables)
+	if err != nil {
+		log.Println("wechatCopyDBTables:", err)
+		return err
+	}
+
+	columns := "TalkerId, MsgSvrID, Type, SubType, IsSender, CreateTime, Sequence, StatusEx, FlagEx, Status, MsgServerSeq, MsgSequence, StrTalker, StrContent, DisplayContent, Reserved0, Reserved1, Reserved2, Reserved3, Reserved4, Reserved5, Reserved6, CompressContent, BytesExtra, BytesTrans"
+	for _, msgDB := range P.msgDBs {
+		err = wechatCopyTableData(exMsgDB, msgDB.db, "MSG", columns, "StrTalker", []string{userName})
+		if err != nil {
+			log.Println("wechatCopyTableData MSG:", err)
+			return err
+		}
+	}
+
+	columns = "UsrName"
+	for _, msgDB := range P.msgDBs {
+		err = wechatCopyTableData(exMsgDB, msgDB.db, "Name2ID", columns, "UsrName", []string{userName})
+		if err != nil {
+			continue
+		}
+		// log.Println("Name2ID:", userName)
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) weChatExportUserDataDBByUserName(userName, exportPath string) error {
+	exUserDataDBPath := exportPath + "\\" + UserDataDB
+	if _, err := os.Stat(exUserDataDBPath); err == nil {
+		log.Println("exist", exUserDataDBPath)
+		return errors.New("exist " + exUserDataDBPath)
+	}
+
+	exUserDataDB, err := sql.Open("sqlite3", exUserDataDBPath)
+	if err != nil {
+		log.Println("db open", err)
+		return err
+	}
+	defer exUserDataDB.Close()
+
+	tables := []string{"lastTime", "bookMark"}
+	err = wechatCopyDBTables(exUserDataDB, P.userData, tables)
+	if err != nil {
+		log.Println("wechatCopyDBTables:", err)
+		return err
+	}
+
+	columns := "localId,userName,timestamp,messageId,Reserved0,Reserved1,Reserved2,Reserved3"
+	err = wechatCopyTableData(exUserDataDB, P.userData, "lastTime", columns, "userName", []string{userName})
+	if err != nil {
+		log.Println("wechatCopyTableData lastTime:", err)
+		return err
+	}
+
+	columns = "localId, userName, markId, tag, info, Reserved0, Reserved1, Reserved2, Reserved3"
+	err = wechatCopyTableData(exUserDataDB, P.userData, "bookMark", columns, "userName", []string{userName})
+	if err != nil {
+		log.Println("wechatCopyTableData bookMark:", err)
+		return err
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) weChatExportOpenIMContactDBByUserName(userName, exportPath string) error {
+	hasOpenIM := false
+	IsGroup := false
+	if strings.HasSuffix(userName, "@openim") {
+		hasOpenIM = true
+	}
+
+	userNames := make([]string, 0)
+	if strings.HasSuffix(userName, "@chatroom") {
+		IsGroup = true
+		uList, err := P.WeChatGetChatRoomUserList(userName)
+		if err != nil {
+			log.Println("WeChatGetChatRoomUserList failed:", err)
+			return err
+		}
+		for i := range uList.Users {
+			if strings.HasSuffix(uList.Users[i].UserName, "@openim") {
+				userNames = append(userNames, uList.Users[i].UserName)
+				hasOpenIM = true
+			}
+		}
+	}
+
+	if !hasOpenIM || P.openIMContact == nil {
+		log.Println("not Open Im")
+		return nil
+	}
+
+	exOpenIMContactDBPath := exportPath + "\\" + OpenIMContactDB
+	if _, err := os.Stat(exOpenIMContactDBPath); err == nil {
+		log.Println("exist", exOpenIMContactDBPath)
+		return errors.New("exist " + exOpenIMContactDBPath)
+	}
+
+	exOpenIMContactDB, err := sql.Open("sqlite3", exOpenIMContactDBPath)
+	if err != nil {
+		log.Println("db open", err)
+		return err
+	}
+	defer exOpenIMContactDB.Close()
+
+	tables := []string{"OpenIMContact"}
+	err = wechatCopyDBTables(exOpenIMContactDB, P.openIMContact, tables)
+	if err != nil {
+		log.Println("wechatCopyDBTables:", err)
+		return err
+	}
+
+	copyContactData := func(users []string) error {
+		columns := "UserName, NickName, Type, Remark, BigHeadImgUrl, SmallHeadImgUrl, Source, NickNamePYInit, NickNameQuanPin, RemarkPYInit, RemarkQuanPin, CustomInfoDetail, CustomInfoDetailVisible, AntiSpamTicket, AppId, Sex, DescWordingId, Reserved1, Reserved2, Reserved3, Reserved4, Reserved5, Reserved6, Reserved7, Reserved8, ExtraBuf"
+		err = wechatCopyTableData(exOpenIMContactDB, P.openIMContact, "OpenIMContact", columns, "UserName", users)
+		if err != nil {
+			log.Println("wechatCopyTableData OpenIMContact:", err)
+			return err
+		}
+
+		return nil
+	}
+
+	if !IsGroup {
+		return copyContactData([]string{userName})
+	}
+
+	chunkSize := 100
+	for i := 0; i < len(userNames); i += chunkSize {
+		end := i + chunkSize
+		if end > len(userNames) {
+			end = len(userNames)
+		}
+		err = copyContactData(userNames[i:end])
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func wechatCopyDBTables(dts, src *sql.DB, tables []string) error {
+	for _, tab := range tables {
+		querySql := fmt.Sprintf("SELECT sql FROM sqlite_master WHERE tbl_name='%s';", tab)
+		// log.Println("querySql:", querySql)
+		rows, err := src.Query(querySql)
+		if err != nil {
+			rows.Close()
+			log.Println("src.Query", err)
+			continue
+		}
+
+		var createStatements []string
+		for rows.Next() {
+			var sql string
+			if err := rows.Scan(&sql); err != nil {
+				log.Println(err)
+				continue
+			}
+			if sql != "" {
+				createStatements = append(createStatements, sql)
+			}
+		}
+		rows.Close()
+		// log.Println("createStatements:", createStatements)
+		tx, err := dts.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin transaction: %v", err)
+		}
+
+		for _, stmt := range createStatements {
+			if _, err := tx.Exec(stmt); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("failed to execute statement: %s, error: %v", stmt, err)
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func wechatCopyTableData(dts, src *sql.DB, tableName, columns, conditionField string, conditionValue []string) error {
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s = '%s'", columns, tableName, conditionField, conditionValue[0])
+	if len(conditionValue) > 1 {
+		query = fmt.Sprintf("SELECT %s FROM %s WHERE %s IN ('%s')", columns, tableName, conditionField, strings.Join(conditionValue, "','"))
+	}
+	// log.Println("query:", query)
+	rows, err := src.Query(query)
+	if err != nil {
+		return fmt.Errorf("query src failed: %v", err)
+	}
+	defer rows.Close()
+
+	tx, err := dts.Begin()
+	if err != nil {
+		return fmt.Errorf("dts.Begin failed: %v", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	columnList := strings.Split(columns, ",")
+	placeholders := strings.Repeat("?, ", len(columnList))
+	placeholders = placeholders[:len(placeholders)-2]
+	insertQuery := fmt.Sprintf("INSERT OR IGNORE INTO %s (%s) VALUES (%s)", tableName, columns, placeholders)
+	// log.Println("wechatCopyTableData:", insertQuery)
+	stmt, err := tx.Prepare(insertQuery)
+	if err != nil {
+		return fmt.Errorf("prepare insertquery: %v", err)
+	}
+	defer stmt.Close()
+
+	for rows.Next() {
+		values := make([]interface{}, len(columnList))
+		valuePtrs := make([]interface{}, len(columnList))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return fmt.Errorf("scan rows failed: %v", err)
+		}
+
+		if _, err := stmt.Exec(values...); err != nil {
+			return fmt.Errorf("insert data failed: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func (P *WechatDataProvider) WeChatExportFileByUserName(userName, exportPath string) error {
+
+	topDir := filepath.Dir(P.resPath)
+	topDir = filepath.Dir(topDir)
+	pageSize := 600
+	_time := time.Now().Unix()
+	taskChan := make(chan [2]string, 100)
+	var wg sync.WaitGroup
+
+	taskSend := func(topDir, path, exportPath string, taskChan chan [2]string) {
+		if path == "" {
+			return
+		}
+		srcFile := topDir + path
+		if _, err := os.Stat(srcFile); err != nil {
+			// log.Println("no exist:", srcFile)
+			return
+		}
+
+		dstFile := exportPath + path
+		dstDir := filepath.Dir(dstFile)
+		if _, err := os.Stat(dstDir); err != nil {
+			os.MkdirAll(dstDir, os.ModePerm)
+		}
+
+		task := [2]string{srcFile, dstFile}
+		taskChan <- task
+	}
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskChan {
+				// log.Println("copy: ", task[0], task[1])
+				utils.CopyFile(task[0], task[1])
+			}
+		}()
+	}
+
+	for {
+		mlist, err := P.WeChatGetMessageListByTime(userName, _time, pageSize, Message_Search_Forward)
+		if err != nil {
+			return err
+		}
+
+		paths := make([]string, 0)
+		for _, m := range mlist.Rows {
+			switch m.Type {
+			case Wechat_Message_Type_Picture:
+				paths = append(paths, m.ThumbPath, m.ImagePath)
+			case Wechat_Message_Type_Voice:
+				paths = append(paths, m.VoicePath)
+			case Wechat_Message_Type_Visit_Card:
+				paths = append(paths, m.VisitInfo.LocalHeadImgUrl)
+			case Wechat_Message_Type_Video:
+				paths = append(paths, m.ThumbPath, m.VideoPath)
+			case Wechat_Message_Type_Location:
+				paths = append(paths, m.LocationInfo.ThumbPath)
+			case Wechat_Message_Type_Misc:
+				switch m.SubType {
+				case Wechat_Misc_Message_Music:
+					paths = append(paths, m.MusicInfo.ThumbPath)
+				case Wechat_Misc_Message_ThirdVideo:
+					paths = append(paths, m.ThumbPath)
+				case Wechat_Misc_Message_CardLink:
+					paths = append(paths, m.ThumbPath)
+				case Wechat_Misc_Message_File:
+					paths = append(paths, m.FileInfo.FilePath)
+				case Wechat_Misc_Message_Applet:
+					paths = append(paths, m.ThumbPath)
+				case Wechat_Misc_Message_Applet2:
+					paths = append(paths, m.ThumbPath)
+				case Wechat_Misc_Message_Channels:
+					paths = append(paths, m.ChannelsInfo.ThumbPath)
+				case Wechat_Misc_Message_Live:
+					paths = append(paths, m.ChannelsInfo.ThumbPath)
+				case Wechat_Misc_Message_Game:
+					paths = append(paths, m.ThumbPath)
+				case Wechat_Misc_Message_TingListen:
+					paths = append(paths, m.MusicInfo.ThumbPath)
+				}
+			}
+		}
+
+		for _, path := range paths {
+			taskSend(topDir, path, exportPath, taskChan)
+		}
+
+		if mlist.Total < pageSize {
+			break
+		}
+		_time = mlist.Rows[mlist.Total-1].CreateTime - 1
+	}
+	log.Println("message file done")
+	//copy HeadImage
+	taskSend(topDir, P.SelfInfo.LocalHeadImgUrl, exportPath, taskChan)
+	info, err := P.WechatGetUserInfoByNameOnCache(userName)
+	if err == nil {
+		taskSend(topDir, info.LocalHeadImgUrl, exportPath, taskChan)
+	}
+
+	if strings.HasSuffix(userName, "@chatroom") {
+		uList, err := P.WeChatGetChatRoomUserList(userName)
+		if err == nil {
+			for _, user := range uList.Users {
+				taskSend(topDir, user.LocalHeadImgUrl, exportPath, taskChan)
+			}
+		}
+	}
+	log.Println("HeadImage file done")
+	close(taskChan)
+	wg.Wait()
+
+	return nil
 }

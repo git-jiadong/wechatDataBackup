@@ -103,3 +103,6 @@ A: Win7电脑需要安装WebView2运行时才能正常使用。github release版
 - silk语音消息解码 [silk-v3-decoder](https://github.com/kn007/silk-v3-decoder)
 - PCM转MP3 [lame](https://github.com/viert/lame.git)
 - Dat图片解码 [wechatDatDecode](https://github.com/liuggchen/wechatDatDecode)
+
+## 交流/讨论
+![](./res/wechatQR.png)

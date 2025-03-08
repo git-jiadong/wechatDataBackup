@@ -185,7 +185,11 @@ func removeCustomTags(input string) string {
 }
 
 func Html2Text(htmlStr string) string {
-	if htmlStr[0] != '<' {
+	// if htmlStr == "" {
+	// 	return ""
+	// }
+
+	if len(htmlStr) == 0 || htmlStr[0] != '<' {
 		return htmlStr
 	}
 
