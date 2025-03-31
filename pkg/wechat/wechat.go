@@ -598,7 +598,7 @@ func GetWeChatInfo() (list *WeChatInfoList) {
 			for _, f := range files {
 				if strings.HasSuffix(f.Path, "\\Media.db") {
 					// fmt.Printf("opened %s\n", f.Path[4:])
-					filePath := f.Path[4:]
+					filePath := f.Path
 					parts := strings.Split(filePath, string(filepath.Separator))
 					if len(parts) < 4 {
 						log.Println("Error filePath " + filePath)

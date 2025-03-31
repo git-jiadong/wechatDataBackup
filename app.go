@@ -23,7 +23,7 @@ const (
 	configDefaultUserKey = "userConfig.defaultUser"
 	configUsersKey       = "userConfig.users"
 	configExportPathKey  = "exportPath"
-	appVersion           = "v1.2.1"
+	appVersion           = "v1.2.2"
 )
 
 type FileLoader struct {
@@ -832,14 +832,6 @@ func (a *App) ExportWeChatDataByUserName(userName, path string) string {
 		return "WeChatExportDataByUserName failed:" + err.Error()
 	}
 
-	exeSrcPath := a.FLoader.FilePrefix + "\\" + "wechatDataBackup.exe"
-	exeDstPath := exPath + "\\" + "wechatDataBackup.exe"
-	_, err = utils.CopyFile(exeSrcPath, exeDstPath)
-	if err != nil {
-		log.Println("CopyFile:", err)
-		return "CopyFile:" + err.Error()
-	}
-
 	config := map[string]interface{}{
 		"exportpath": ".\\",
 		"userconfig": map[string]interface{}{
@@ -860,6 +852,21 @@ func (a *App) ExportWeChatDataByUserName(userName, path string) string {
 		log.Println("WriteFile:", err)
 		return "WriteFile:" + err.Error()
 	}
+
+	exeSrcPath, err := os.Executable()
+	if err != nil {
+		log.Println("Executable:", exeSrcPath)
+		return "Executable:" + err.Error()
+	}
+
+	exeDstPath := exPath + "\\" + "wechatDataBackup.exe"
+	log.Printf("Copy [%s] -> [%s]\n", exeSrcPath, exeDstPath)
+	_, err = utils.CopyFile(exeSrcPath, exeDstPath)
+	if err != nil {
+		log.Println("CopyFile:", err)
+		return "CopyFile:" + err.Error()
+	}
+	return ""
 
 	return ""
 }
