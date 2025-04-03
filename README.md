@@ -1,13 +1,34 @@
-# wechatDataBackup
-PC微信聊天记录数据导出工具
+<p align="center" style="text-align: center">
+  <img src="./res/logo.png" width="15%"><br/>
+</p>
 
-[![GitHub stars](https://img.shields.io/github/stars/git-jiadong/wechatDataBackup)](https://github.com/git-jiadong/wechatDataBackup/stargazers)
-[![GitHub all releases](https://img.shields.io/github/downloads/git-jiadong/wechatDataBackup/total)](https://github.com/git-jiadong/wechatDataBackup/releases)
-[![GitHub release](https://img.shields.io/github/v/release/git-jiadong/wechatDataBackup)](https://github.com/git-jiadong/wechatDataBackup/releases)
-[![GitHub last commit](https://img.shields.io/github/last-commit/git-jiadong/wechatDataBackup)](https://github.com/git-jiadong/wechatDataBackup/commits/main)
-[![GitHub top language](https://img.shields.io/github/languages/top/git-jiadong/wechatDataBackup)](https://github.com/git-jiadong/wechatDataBackup)
-[![GitHub repo size](https://img.shields.io/github/repo-size/git-jiadong/wechatDataBackup)](https://github.com/git-jiadong/wechatDataBackup)
-[![GitHub license](https://img.shields.io/github/license/git-jiadong/wechatDataBackup)](https://github.com/git-jiadong/wechatDataBackup/blob/main/LICENSE)
+<p align="center">
+  <b>wechatDataBackup: PC微信聊天记录数据导出工具</b>
+  <br/>
+  <br/>
+  <a href="https://github.com/git-jiadong/wechatDataBackup/stargazers">
+    <img src="https://img.shields.io/github/stars/git-jiadong/wechatDataBackup" alt="GitHub Star"/>
+  </a>
+  <a href="https://github.com/git-jiadong/wechatDataBackup/releases">
+    <img src="https://img.shields.io/github/downloads/git-jiadong/wechatDataBackup/total" alt="downloads" />
+  </a>
+  <a href="https://github.com/git-jiadong/wechatDataBackup/releases">
+    <img src="https://img.shields.io/github/v/release/git-jiadong/wechatDataBackup" alt="releases version"/>
+  </a>
+  <a href="https://github.com/git-jiadong/wechatDataBackup/commits/main">
+    <img src="https://img.shields.io/github/last-commit/git-jiadong/wechatDataBackup" alt="last commit" />
+  </a>
+  <a href="https://github.com/git-jiadong/wechatDataBackup" >
+    <img src="https://img.shields.io/github/languages/top/git-jiadong/wechatDataBackup" alt="languages"/>
+  </a>
+  <a href="https://github.com/git-jiadong/wechatDataBackup" >
+    <img src="https://img.shields.io/github/repo-size/git-jiadong/wechatDataBackup" alt="repo size" />
+  </a>
+  <a href="https://github.com/git-jiadong/wechatDataBackup/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/git-jiadong/wechatDataBackup" alt="license" />
+  </a>
+</p>
+# wechatDataBackup
 
 * 基于wails开发 + React前端，实现PC端微信聊天记录一键导出功能。
 * 导出后数据可以做永久化保存，即使微信停止支持，聊天记录也可以随时查看。
