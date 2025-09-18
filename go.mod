@@ -9,7 +9,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/pierrec/lz4 v2.6.1+incompatible
 	github.com/pkg/browser v0.0.0-20210911075715-681adbf594b8
-	github.com/shirou/gopsutil v2.21.11+incompatible
 	github.com/shirou/gopsutil/v3 v3.24.2
 	github.com/spf13/viper v1.18.2
 	github.com/wailsapp/wails/v2 v2.9.1
