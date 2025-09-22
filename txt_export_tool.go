@@ -12,7 +12,6 @@ import (
 )
 
 func main() {
-	// 命令行参数
 	var (
 		dataPath   = flag.String("data", "", "微信数据路径 (例如: C:\\export\\User\\wxid_xxx)")
 		userName   = flag.String("user", "", "要导出的用户名")
@@ -30,13 +29,11 @@ func main() {
 		return
 	}
 
-	// 检查数据路径
 	if _, err := os.Stat(*dataPath); err != nil {
 		fmt.Printf("错误: 数据路径不存在: %s\n", *dataPath)
 		return
 	}
 
-	// 创建数据提供者
 	prefixPath := "\\User\\" + filepath.Base(*dataPath)
 	provider, err := wechat.CreateWechatDataProvider(*dataPath, prefixPath)
 	if err != nil {
@@ -45,20 +42,17 @@ func main() {
 	}
 	defer provider.WechatWechatDataProviderClose()
 
-	// 如果是列出用户
 	if *listUsers {
 		listAllUsers(provider)
 		return
 	}
 
-	// 检查用户名参数
 	if *userName == "" {
 		fmt.Println("错误: 请指定要导出的用户名")
 		fmt.Println("使用 -list 参数查看所有可用用户")
 		return
 	}
 
-	// 导出txt
 	result := exportToTxt(provider, *userName, *outputPath)
 	fmt.Println(result)
 }
@@ -66,7 +60,6 @@ func main() {
 func listAllUsers(provider *wechat.WechatDataProvider) {
 	fmt.Println("\n=== 可用的聊天对象 ===")
 	
-	// 获取会话列表
 	sessionList, err := provider.WeChatGetSessionList(0, 100)
 	if err != nil {
 		fmt.Printf("获取会话列表失败: %v\n", err)
@@ -98,13 +91,11 @@ func listAllUsers(provider *wechat.WechatDataProvider) {
 }
 
 func exportToTxt(provider *wechat.WechatDataProvider, userName, outputPath string) string {
-	// 获取用户信息
 	userInfo, err := provider.WechatGetUserInfoByNameOnCache(userName)
 	if err != nil {
 		return fmt.Sprintf("错误: 找不到用户 %s: %v", userName, err)
 	}
 
-	// 创建输出文件
 	timestamp := time.Now().Format("20060102_150405")
 	filename := fmt.Sprintf("wechat_chat_%s_%s.txt", userName, timestamp)
 	fullPath := filepath.Join(outputPath, filename)
@@ -115,7 +106,6 @@ func exportToTxt(provider *wechat.WechatDataProvider, userName, outputPath strin
 	}
 	defer file.Close()
 
-	// 写入文件头
 	header := fmt.Sprintf("微信聊天记录导出\n")
 	header += fmt.Sprintf("导出时间: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 	header += fmt.Sprintf("聊天对象: %s", userInfo.NickName)
@@ -132,7 +122,6 @@ func exportToTxt(provider *wechat.WechatDataProvider, userName, outputPath strin
 	
 	file.WriteString(header)
 
-	// 分页获取消息
 	pageSize := 500
 	currentTime := time.Now().Unix()
 	totalMessages := 0
@@ -150,21 +139,17 @@ func exportToTxt(provider *wechat.WechatDataProvider, userName, outputPath strin
 			break
 		}
 
-		// 处理每条消息
 		for _, msg := range messageList.Rows {
 			msgText := formatMessageToText(&msg, provider.SelfInfo.UserName)
 			file.WriteString(msgText + "\n")
 			totalMessages++
 		}
 
-		// 显示进度
 		fmt.Printf("已处理 %d 条消息...\r", totalMessages)
 
-		// 更新时间指针
 		currentTime = messageList.Rows[messageList.Total-1].CreateTime - 1
 	}
 
-	// 写入统计信息
 	footer := fmt.Sprintf("\n%s\n", strings.Repeat("=", 50))
 	footer += fmt.Sprintf("导出完成，共导出 %d 条消息\n", totalMessages)
 	file.WriteString(footer)
@@ -173,10 +158,8 @@ func exportToTxt(provider *wechat.WechatDataProvider, userName, outputPath strin
 }
 
 func formatMessageToText(msg *wechat.WeChatMessage, selfUserName string) string {
-	// 格式化时间
 	msgTime := time.Unix(msg.CreateTime, 0).Format("2006-01-02 15:04:05")
 	
-	// 确定发送者
 	var sender string
 	if msg.IsSender == 1 {
 		sender = "我"
@@ -190,7 +173,6 @@ func formatMessageToText(msg *wechat.WeChatMessage, selfUserName string) string 
 		}
 	}
 
-	// 格式化消息内容
 	var content string
 	switch msg.Type {
 	case wechat.Wechat_Message_Type_Text:
@@ -256,4 +238,5 @@ func formatMiscMessage(msg *wechat.WeChatMessage) string {
 	default:
 		return fmt.Sprintf("[其他消息:%d] %s", msg.SubType, msg.Content)
 	}
+
 }
