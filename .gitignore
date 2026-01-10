@@ -1,0 +1,34 @@
+# After editing .gitignore to match the ignored files, you can do < git ls-files -ci --exclude-standard >
+# to see the files that are included in the exclude lists; you can then do
+# 
+# @ Linux/MacOS: < git ls-files -ci --exclude-standard -z | xargs -0 git rm --cached >
+# @ Windows (PowerShell): < git ls-files -ci --exclude-standard | % { git rm --cached "$_" } >
+# @ Windows (cmd.exe): < for /F "tokens=*" %a in ('git ls-files -ci --exclude-standard') do @git rm --cached "%a" >
+# ...to re-init the ignore list
+
+# Wails directories
+build/bin
+frontend/wailsjs
+frontend/node_modules
+
+# Wails junk files
+.syso
+
+# Go files
+go.sum
+
+# IDEs
+.idea
+.vscode
+
+# System enviroment variables
+env
+*/.DS_Store
+
+
+# runtime
+User
+config.json
+wechatDataBackup.exe
+app.log
+app-*.log
